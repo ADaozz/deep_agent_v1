@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Supervisor Conversation Runtime</title>
+    <meta
+      name="description"
+      content="Supervisor 驱动的 AI Agent Task Management 界面，展示任务拆解、执行进度、worker 协作与结果收敛。"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "react": "https://esm.sh/react@18.3.1?dev",
+          "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?dev",
+          "htm": "https://esm.sh/htm@3.1.1?dev",
+          "lucide-react": "https://esm.sh/lucide-react@0.511.0?dev&external=react",
+          "marked": "https://esm.sh/marked@15.0.12?dev",
+          "dompurify": "https://esm.sh/dompurify@3.2.6?dev",
+          "mermaid": "https://esm.sh/mermaid@11.6.0?dev"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

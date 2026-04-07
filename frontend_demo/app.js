@@ -1,0 +1,956 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
+import htm from "htm";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
+import mermaid from "mermaid";
+import {
+  Activity,
+  ArrowUp,
+  Bot,
+  CheckCircle2,
+  ChevronDown,
+  Circle,
+  ClipboardList,
+  Contrast,
+  LoaderCircle,
+  MessageSquare,
+  MonitorCog,
+  Plus,
+  ShieldAlert,
+  Sparkles,
+  Square,
+  TerminalSquare,
+  X,
+  XCircle,
+} from "lucide-react";
+
+const html = htm.bind(React.createElement);
+let mermaidReady = false;
+
+const MAX_ROUNDS = 12;
+const DEFAULT_THEME = "vscode-light";
+const DEFAULT_QUERY = "";
+
+const THEMES = [
+  { id: "vscode-light", label: "VS Code Light", icon: MonitorCog },
+  { id: "vscode-hc", label: "High Contrast", icon: Contrast },
+];
+
+const EMPTY_STATE = {
+  query: DEFAULT_QUERY,
+  max_rounds: MAX_ROUNDS,
+  status: "idle",
+  current_round: 0,
+  scheduler_thought: "等待 query 进入。Supervisor 将先做任务原子化，再决定派发哪些 worker。",
+  stop_reason: "",
+  final_summary: "",
+  tasks: [],
+  rounds: [],
+  agents: [],
+  logs: [],
+};
+
+const EMPTY_AGENT_FORM = {
+  name: "",
+  display_name: "",
+  role: "",
+  description: "",
+  system_prompt: "",
+};
+
+function cloneBaseState() {
+  return {
+    ...EMPTY_STATE,
+    tasks: [],
+    rounds: [],
+    agents: [],
+    logs: [],
+  };
+}
+
+function normalizeAgent(agent, existing = {}) {
+  return {
+    id: agent.id,
+    name: agent.name || existing.name || agent.id,
+    role: agent.role || existing.role || "",
+    description: agent.description || existing.description || "",
+    status: agent.status || existing.status || "idle",
+    current_task_title: agent.current_task_title || existing.current_task_title || "",
+    report: agent.report || existing.report || "",
+    todo_list: agent.todo_list || existing.todo_list || [],
+    completed_rounds: agent.completed_rounds ?? existing.completed_rounds ?? 0,
+    guard_hits: agent.guard_hits ?? existing.guard_hits ?? 0,
+    last_guard_message: agent.last_guard_message || existing.last_guard_message || "",
+  };
+}
+
+function stepState(status) {
+  if (status === "running" || status === "in_progress") return "running";
+  if (status === "done" || status === "completed" || status === "success") return "success";
+  if (status === "blocked" || status === "error" || status === "failed") return "error";
+  return "pending";
+}
+
+function stepLabel(status) {
+  const value = stepState(status);
+  if (value === "running") return "进行中";
+  if (value === "success") return "已完成";
+  if (value === "error") return "失败/拦截";
+  return "待处理";
+}
+
+function statusClass(status) {
+  const value = stepState(status);
+  if (value === "running") return "is-running";
+  if (value === "success") return "is-success";
+  if (value === "error") return "is-error";
+  return "is-pending";
+}
+
+function IconForStep({ status, compact = false }) {
+  const value = stepState(status);
+  const size = compact ? "h-3.5 w-3.5" : "h-4 w-4";
+  if (value === "running") {
+    return html`<span className="status-icon is-running">
+      <${LoaderCircle} className=${`${size} animate-spin`} />
+    </span>`;
+  }
+  if (value === "success") {
+    return html`<span className="status-icon is-success step-pop">
+      <${CheckCircle2} className=${size} />
+    </span>`;
+  }
+  if (value === "error") {
+    return html`<span className="status-icon is-error">
+      <${XCircle} className=${size} />
+    </span>`;
+  }
+  return html`<span className="status-icon is-pending">
+    <${Circle} className=${size} />
+  </span>`;
+}
+
+function SectionTitle({ icon: Icon, title, meta }) {
+  return html`<div className="message-section-title">
+    <div className="message-section-heading">
+      <${Icon} className="h-4 w-4" />
+      <span>${title}</span>
+    </div>
+    ${meta ? html`<span className="message-section-meta">${meta}</span>` : null}
+  </div>`;
+}
+
+function TaskList({ tasks }) {
+  if (!tasks.length) {
+    return html`<div className="empty-block">Action List 会在 Supervisor 完成任务原子化后出现。</div>`;
+  }
+
+  return html`<div className="stack-block">
+    ${tasks.map(
+      (task, index) => html`<div key=${task.id || task.title || index} className=${`timeline-card ${statusClass(task.status)}`}>
+        <div className="timeline-rail">
+          <${IconForStep} status=${task.status} />
+          ${index < tasks.length - 1 ? html`<div className="timeline-line"></div>` : null}
+        </div>
+        <div className="timeline-content">
+          <div className="timeline-header">
+            <div>
+              <div className="timeline-title">${task.title || task.id || "未命名任务"}</div>
+              <div className="timeline-desc">${task.detail || task.summary || "等待 Supervisor 分配更具体的执行说明。"}</div>
+            </div>
+            <div className="timeline-side">
+              <span className="tag">${stepLabel(task.status)}</span>
+              <span>${task.owner || "Supervisor"} · Round ${task.last_round || "-"}</span>
+            </div>
+          </div>
+        </div>
+      </div>`
+    )}
+  </div>`;
+}
+
+function TodoList({ todos }) {
+  if (!todos.length) {
+    return null;
+  }
+
+  return html`<div className="stack-block">
+    ${todos.map(
+      (todo, index) => html`<div key=${todo.id || todo.label || index} className=${`todo-card ${statusClass(todo.status)}`}>
+        <div className="todo-head">
+          <div className="todo-title">
+            <${IconForStep} status=${todo.status} compact=${true} />
+            <span>${todo.label || "未命名待办"}</span>
+          </div>
+          <span className="tag">${stepLabel(todo.status)}</span>
+        </div>
+        <div className="todo-note">${todo.note || "等待该 worker 填写说明。"}</div>
+        <div className="evidence-box">
+          <span className="evidence-label">Evidence</span>
+          <div>${todo.result || "尚未提供 evidence。"}</div>
+        </div>
+      </div>`
+    )}
+  </div>`;
+}
+
+function RoundList({ rounds }) {
+  if (!rounds.length) {
+    return html`<div className="empty-block">每个执行周期都会在这里以会话消息形式展开。</div>`;
+  }
+
+  return html`<div className="stack-block">
+    ${rounds.map(
+      (round, index) => html`<details key=${round.index || index} className="disclosure-card">
+        <summary>
+          <div>
+            <div className="summary-title">Round ${round.index}</div>
+            <div className="summary-subtitle">${round.thought || "等待本轮说明。"}</div>
+          </div>
+          <${ChevronDown} className="h-4 w-4 disclosure-icon" />
+        </summary>
+        <div className="disclosure-body">
+          ${(round.dispatches || []).length
+            ? html`<div className="stack-block">
+                ${(round.dispatches || []).map(
+                  (dispatch, dispatchIndex) => html`<div key=${`${round.index || index}-${dispatchIndex}`} className="inline-log">${dispatch}</div>`
+                )}
+              </div>`
+            : html`<div className="empty-block">本轮没有 dispatch 记录。</div>`}
+          <div className="note-block">${round.conclusion || "等待本轮收敛结论。"}</div>
+        </div>
+      </details>`
+    )}
+  </div>`;
+}
+
+function WorkerList({ agents, onOpen }) {
+  if (!agents.length) {
+    return html`<div className="empty-block">当前没有活跃 worker。需要时可用顶部按钮新增子 Agent。</div>`;
+  }
+
+  return html`<div className="stack-block">
+    ${agents.map((agent) => {
+      const shouldOpen =
+        Boolean(agent.todo_list?.length) ||
+        agent.status === "running" ||
+        agent.status === "blocked" ||
+        Boolean(agent.report) ||
+        Boolean(agent.last_guard_message);
+      const todoCountText =
+        agent.todo_list?.length
+          ? String(agent.todo_list.length)
+          : stepState(agent.status) === "running"
+            ? "同步中"
+            : "0";
+      const guardText = agent.last_guard_message
+        ? `已拦截 ${Math.max(agent.guard_hits || 1, 1)} 次`
+        : agent.status === "blocked"
+          ? "已阻塞"
+          : "正常";
+      return html`<details key=${agent.id || agent.name} className=${`disclosure-card ${statusClass(agent.status)}`} open=${shouldOpen}>
+        <summary>
+          <div className="worker-summary">
+            <button
+              type="button"
+              className="worker-avatar"
+              onClick=${(event) => {
+                event.preventDefault();
+                onOpen(agent);
+              }}
+              title="查看 Agent metadata"
+            >
+              <${Bot} className="h-4 w-4" />
+            </button>
+            <div>
+              <div className="summary-title">${agent.name}</div>
+              <div className="summary-subtitle">
+                ${agent.role || "未定义角色"} · ${agent.current_task_title || "待命中"}
+              </div>
+            </div>
+          </div>
+          <div className="summary-tail">
+            <span className="tag">${stepLabel(agent.status)}</span>
+            <${ChevronDown} className="h-4 w-4 disclosure-icon" />
+          </div>
+        </summary>
+        <div className="disclosure-body">
+          <div className="detail-grid">
+            <div className="metric-card">
+              <span className="metric-label">Checklist</span>
+              <span className="metric-value">${todoCountText}</span>
+            </div>
+            <div className="metric-card">
+              <span className="metric-label">Runtime guard</span>
+              <span className="metric-value">${guardText}</span>
+            </div>
+          </div>
+          <div className="note-block">${agent.report || "本轮尚未汇报。"}</div>
+          ${agent.last_guard_message ? html`<div className="alert-block">${agent.last_guard_message}</div>` : null}
+          <${TodoList} todos=${agent.todo_list || []} />
+        </div>
+      </details>`;
+    })}
+  </div>`;
+}
+
+function LogList({ logs }) {
+  if (!logs.length) {
+    return html`<div className="empty-block">执行日志会在这里以对话内附属记录方式展示。</div>`;
+  }
+
+  return html`<div className="stack-block">
+    ${logs.map(
+      (log, index) => html`<div key=${`${log.time || "log"}-${log.source || "source"}-${index}`} className="inline-log">
+        <div className="log-meta">${log.time} · ${log.source}</div>
+        <div>${log.message}</div>
+      </div>`
+    )}
+  </div>`;
+}
+
+function ChatBubble({ kind = "assistant", title, eyebrow, icon: Icon, children, accent = "" }) {
+  return html`<article className=${`chat-row ${kind === "user" ? "is-user" : ""}`}>
+    <div className=${`chat-bubble ${kind === "user" ? "is-user" : ""} ${accent}`}>
+      <div className="chat-bubble-head">
+        <div className="chat-bubble-title">
+          ${Icon ? html`<${Icon} className="h-4 w-4" />` : null}
+          <span>${title}</span>
+        </div>
+        ${eyebrow ? html`<span className="chat-bubble-eyebrow">${eyebrow}</span>` : null}
+      </div>
+      <div className="chat-bubble-body">${children}</div>
+    </div>
+  </article>`;
+}
+
+function EmptyHint({ text }) {
+  return html`<div className="compact-hint">${text}</div>`;
+}
+
+function FinalSummaryContent({ content }) {
+  const containerRef = useRef(null);
+  const renderedMarkdown = useMemo(() => {
+    const rawHtml = marked.parse(content || "", {
+      gfm: true,
+      breaks: true,
+    });
+    return DOMPurify.sanitize(rawHtml, {
+      USE_PROFILES: { html: true },
+    });
+  }, [content]);
+
+  useEffect(() => {
+    if (!containerRef.current) return undefined;
+    if (!mermaidReady) {
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: "default",
+      });
+      mermaidReady = true;
+    }
+
+    let cancelled = false;
+    const mermaidBlocks = Array.from(containerRef.current.querySelectorAll("pre > code.language-mermaid"));
+
+    async function renderMermaidBlocks() {
+      for (const [index, block] of mermaidBlocks.entries()) {
+        if (cancelled) return;
+        const source = block.textContent || "";
+        const host = document.createElement("div");
+        host.className = "mermaid-block";
+        try {
+          const renderId = `mermaid-${Date.now()}-${index}`;
+          const { svg } = await mermaid.render(renderId, source);
+          if (cancelled) return;
+          host.innerHTML = svg;
+        } catch (error) {
+          host.innerHTML = `<pre class="mermaid-error">${String(error?.message || error || "Mermaid render failed.")}</pre>`;
+        }
+        const pre = block.parentElement;
+        pre?.replaceWith(host);
+      }
+    }
+
+    void renderMermaidBlocks();
+    return () => {
+      cancelled = true;
+    };
+  }, [renderedMarkdown]);
+
+  return html`<div
+    ref=${containerRef}
+    className="final-answer-text md-content"
+    dangerouslySetInnerHTML=${{ __html: renderedMarkdown }}
+  ></div>`;
+}
+
+function SessionTranscript({ session, error, onOpenAgent }) {
+  const state = session.state;
+  const completedCount = state.tasks.filter((task) => stepState(task.status) === "success").length;
+  const hasWorkerActivity = state.agents.some(
+    (agent) =>
+      agent.current_task_title ||
+      agent.report ||
+      agent.guard_hits ||
+      agent.last_guard_message ||
+      (agent.todo_list && agent.todo_list.length)
+  );
+  const showAssistantBubble = Boolean(state.final_summary) || state.status === "running";
+  const showTaskBubble = state.tasks.length > 0;
+  const showWorkerBubble = hasWorkerActivity;
+  const showRoundBubble = state.rounds.length > 0;
+  const showLogBubble = state.logs.length > 0;
+
+  return html`<div className="session-thread">
+    <${ChatBubble} title="User Query" eyebrow="Input" icon=${MessageSquare} kind="user">
+      <div className="user-query-text">${session.query}</div>
+    </${ChatBubble}>
+
+    ${
+      showTaskBubble
+        ? html`<${ChatBubble} title="Action List" eyebrow="Execution" icon=${ClipboardList}>
+            <${SectionTitle} icon=${ClipboardList} title="任务追踪" meta=${`${completedCount}/${state.tasks.length || 0} completed`} />
+            <${TaskList} tasks=${state.tasks} />
+          </${ChatBubble}>`
+        : null
+    }
+
+    ${
+      showWorkerBubble
+        ? html`<${ChatBubble} title="Workers And Checklists" eyebrow="Collaboration" icon=${Bot}>
+            <${SectionTitle} icon=${Bot} title="Worker 对话与 check_list" meta=${`${state.agents.length} worker(s)`} />
+            ${
+              hasWorkerActivity
+                ? html`<${WorkerList} agents=${state.agents} onOpen=${onOpenAgent} />`
+                : html`<${EmptyHint} text="worker 已接入，等待 Supervisor 首次派发任务。" />`
+            }
+          </${ChatBubble}>`
+        : null
+    }
+
+    ${
+      showRoundBubble
+        ? html`<${ChatBubble} title="Round Trace" eyebrow="Cycle" icon=${Activity}>
+            <${SectionTitle} icon=${Activity} title="Dispatch 与收敛过程" meta=${`${state.rounds.length} round(s)`} />
+            <${RoundList} rounds=${state.rounds} />
+          </${ChatBubble}>`
+        : null
+    }
+
+    ${
+      showLogBubble
+        ? html`<${ChatBubble} title="Execution Log" eyebrow="Trace" icon=${ShieldAlert}>
+            <details className="disclosure-card log-disclosure" open>
+              <summary>
+                <${SectionTitle} icon=${ShieldAlert} title="事件流" meta=${`${state.logs.length} log(s)`} />
+                <${ChevronDown} className="h-4 w-4 disclosure-icon" />
+              </summary>
+              <div className="disclosure-body">
+                <${LogList} logs=${state.logs} />
+              </div>
+            </details>
+          </${ChatBubble}>`
+        : null
+    }
+
+    ${
+      showAssistantBubble
+        ? html`<${ChatBubble}
+            title=${state.status === "running" && !state.final_summary ? "Assistant" : "Final Summary"}
+            eyebrow="Assistant"
+            icon=${state.status === "running" && !state.final_summary ? LoaderCircle : Sparkles}
+          >
+            <div className="final-answer-text">
+              ${
+                state.status === "running" && !state.final_summary
+                  ? html`<span className="loading-inline">
+                      <${LoaderCircle} className="h-4 w-4 animate-spin" />
+                      <span>正在生成回复...</span>
+                    </span>`
+                  : html`<${FinalSummaryContent} content=${state.final_summary} />`
+              }
+            </div>
+          </${ChatBubble}>`
+        : null
+    }
+  </div>`;
+}
+
+function Modal({ open, title, children, onClose }) {
+  if (!open) return null;
+
+  return html`<div className="modal-root">
+    <button type="button" className="modal-backdrop" aria-label="关闭" onClick=${onClose}></button>
+    <div className="modal-card">
+      <div className="modal-head">
+        <div>
+          <div className="modal-eyebrow">Agent Panel</div>
+          <h3 className="modal-title">${title}</h3>
+        </div>
+        <button type="button" onClick=${onClose} className="icon-button">
+          <${X} className="h-4 w-4" />
+        </button>
+      </div>
+      ${children}
+    </div>
+  </div>`;
+}
+
+function ThemeSwitcher({ theme, setTheme }) {
+  return html`<div className="theme-switcher">
+    ${THEMES.map((item) => {
+      const Icon = item.icon;
+      return html`<button
+        key=${item.id}
+        type="button"
+        onClick=${() => setTheme(item.id)}
+        className=${`theme-chip ${theme === item.id ? "is-active" : ""}`}
+      >
+        <${Icon} className="h-4 w-4" />
+        <span>${item.label}</span>
+      </button>`;
+    })}
+  </div>`;
+}
+
+function App() {
+  const [demoState, setDemoState] = useState(() => cloneBaseState());
+  const [history, setHistory] = useState([]);
+  const [query, setQuery] = useState(DEFAULT_QUERY);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [selectedAgent, setSelectedAgent] = useState(null);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [agentForm, setAgentForm] = useState(EMPTY_AGENT_FORM);
+  const [formFeedback, setFormFeedback] = useState("");
+  const [theme, setTheme] = useState(() => {
+    const savedTheme = window.localStorage.getItem("demo-theme");
+    return THEMES.some((item) => item.id === savedTheme) ? savedTheme : DEFAULT_THEME;
+  });
+  const runControllerRef = useRef(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    window.localStorage.setItem("demo-theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    void loadMeta();
+  }, []);
+
+  async function loadMeta() {
+    try {
+      const response = await fetch("/api/demo/meta");
+      const payload = await response.json();
+      if (!response.ok) return;
+      setDemoState((current) => ({
+        ...current,
+        agents: (payload.agents || []).map((agent) => {
+          const existing = current.agents.find((item) => item.id === agent.id);
+          return normalizeAgent(agent, existing);
+        }),
+      }));
+    } catch {
+      return;
+    }
+  }
+
+  async function handleRun() {
+    const trimmed = query.trim();
+    if (!trimmed || loading) return;
+
+    const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const messageHistory = history.flatMap((session) => {
+      const items = [{ role: "user", content: session.query }];
+      if (session.state.final_summary) {
+        items.push({ role: "assistant", content: session.state.final_summary });
+      }
+      return items;
+    });
+    const controller = new AbortController();
+    runControllerRef.current = controller;
+    setLoading(true);
+    setError("");
+    const nextState = {
+      ...cloneBaseState(),
+      agents: demoState.agents,
+      query: trimmed,
+      status: "running",
+      scheduler_thought: "Supervisor 正在分析 query，准备建立本轮 Action List。",
+    };
+    setDemoState(nextState);
+    setHistory((current) => [
+      ...current,
+      {
+        id: sessionId,
+        query: trimmed,
+        state: nextState,
+        error: "",
+      },
+    ]);
+    setQuery(DEFAULT_QUERY);
+
+    try {
+      const response = await fetch("/api/demo/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          query: trimmed,
+          max_rounds: MAX_ROUNDS,
+          messages: [...messageHistory, { role: "user", content: trimmed }],
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || "backend_error");
+      }
+
+      const contentType = response.headers.get("content-type") || "";
+      if (!response.body || !contentType.includes("application/x-ndjson")) {
+        const payload = await response.json();
+        setDemoState(payload);
+        setHistory((current) =>
+          current.map((item) => (item.id === sessionId ? { ...item, state: payload } : item))
+        );
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (!trimmedLine) continue;
+          const event = JSON.parse(trimmedLine);
+          if (!event?.payload) continue;
+          setDemoState(event.payload);
+          setHistory((current) =>
+            current.map((item) =>
+              item.id === sessionId
+                ? { ...item, state: event.payload, error: event.type === "error" ? event.payload.stop_reason || "执行失败。" : "" }
+                : item
+            )
+          );
+          if (event.type === "error") {
+            setError(event.payload.stop_reason || "执行失败。");
+          }
+        }
+      }
+
+      if (buffer.trim()) {
+        const event = JSON.parse(buffer.trim());
+        if (event?.payload) {
+          setDemoState(event.payload);
+          setHistory((current) =>
+            current.map((item) =>
+              item.id === sessionId
+                ? { ...item, state: event.payload, error: event.type === "error" ? event.payload.stop_reason || "执行失败。" : "" }
+                : item
+            )
+          );
+          if (event.type === "error") {
+            setError(event.payload.stop_reason || "执行失败。");
+          }
+        }
+      }
+    } catch (runError) {
+      if (runError?.name === "AbortError") {
+        const stoppedState = {
+          ...nextState,
+          status: "stopped",
+          stop_reason: "Supervisor 已手动停止。",
+          scheduler_thought: nextState.scheduler_thought || "执行已被手动中止。",
+        };
+        setDemoState(stoppedState);
+        setHistory((current) =>
+          current.map((item) => (item.id === sessionId ? { ...item, state: stoppedState } : item))
+        );
+        return;
+      }
+      setError("后端接口不可用，请先运行 `python3 serve_demo.py`。");
+      const failedState = {
+        ...cloneBaseState(),
+        agents: demoState.agents,
+        query: trimmed,
+        status: "stopped",
+        scheduler_thought: "未能拿到后端调度结果。",
+        final_summary: "当前没有执行结果返回。",
+      };
+      setDemoState(failedState);
+      setHistory((current) =>
+        current.map((item) =>
+          item.id === sessionId ? { ...item, state: failedState, error: "后端接口不可用，请先运行 `python3 serve_demo.py`。" } : item
+        )
+      );
+      console.error(runError);
+    } finally {
+      runControllerRef.current = null;
+      setLoading(false);
+    }
+  }
+
+  function handleStop() {
+    runControllerRef.current?.abort();
+  }
+
+  function handleComposerKeyDown(event) {
+    if (event.key !== "Enter" || event.shiftKey) return;
+    event.preventDefault();
+    void handleRun();
+  }
+
+  function handleReset() {
+    setLoading(false);
+    setError("");
+    setQuery(DEFAULT_QUERY);
+    setHistory([]);
+    setSelectedAgent(null);
+    setShowAddModal(false);
+    setAgentForm(EMPTY_AGENT_FORM);
+    setFormFeedback("");
+    setDemoState((current) => ({
+      ...cloneBaseState(),
+      agents: current.agents,
+    }));
+    void loadMeta();
+  }
+
+  async function handleCreateAgent(event) {
+    event.preventDefault();
+    setFormFeedback("正在创建子 Agent...");
+    try {
+      const response = await fetch("/api/demo/subagents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(agentForm),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "create_failed");
+      setDemoState((current) => ({
+        ...current,
+        agents: (payload.agents || []).map((agent) => {
+          const existing = current.agents.find((item) => item.id === agent.id);
+          return normalizeAgent(agent, existing);
+        }),
+      }));
+      setFormFeedback(`已创建子 Agent: ${payload.agent.name}`);
+      setAgentForm(EMPTY_AGENT_FORM);
+      window.setTimeout(() => {
+        setShowAddModal(false);
+        setFormFeedback("");
+      }, 500);
+    } catch (createError) {
+      setFormFeedback(`创建失败: ${createError.message}`);
+    }
+  }
+
+  const completedCount = demoState.tasks.filter((task) => stepState(task.status) === "success").length;
+  const runningCount = demoState.tasks.filter((task) => stepState(task.status) === "running").length;
+  const workerCount = demoState.agents.filter((agent) => agent.status && agent.status !== "idle" && stepState(agent.status) !== "success").length;
+
+  const headerStatus = useMemo(() => {
+    if (error || demoState.status === "stopped") return { label: "错误", icon: ShieldAlert, tone: "error" };
+    if (demoState.status === "running") return { label: "进行中", icon: LoaderCircle, tone: "running" };
+    if (demoState.status === "done") return { label: "已完成", icon: CheckCircle2, tone: "success" };
+    return { label: "待命", icon: Circle, tone: "pending" };
+  }, [demoState.status]);
+
+  return html`<div className="app-shell">
+    <div className="dialog-shell">
+      <header className="dialog-header">
+        <div>
+          <div className="app-badge">
+            <${TerminalSquare} className="h-4 w-4" />
+            <span>Supervisor Agent Console</span>
+          </div>
+          <h1 className="dialog-title">Conversation Runtime</h1>
+          <p className="dialog-subtitle">
+            页面整体作为一个对话框，Action List、round tracking、worker checklist 与 execution log 全部在会话内展开。
+          </p>
+        </div>
+        <div className="header-side">
+          <button type="button" onClick=${() => setShowAddModal(true)} className="secondary-button">
+            <${Plus} className="h-4 w-4" />
+            <span>新增子 Agent</span>
+          </button>
+          <${ThemeSwitcher} theme=${theme} setTheme=${setTheme} />
+        </div>
+      </header>
+
+      <div className="stats-row">
+        <${StatCard} label="Current round" value=${`${demoState.current_round} / ${demoState.max_rounds || MAX_ROUNDS}`} icon=${Activity} />
+        <${StatCard} label="Action steps" value=${String(demoState.tasks.length)} icon=${ClipboardList} />
+        <${StatCard} label="Completed" value=${String(completedCount)} icon=${CheckCircle2} />
+        <${StatCard} label="Active workers" value=${String(workerCount || runningCount)} icon=${Bot} />
+        <${StatusCard} label="Status" value=${headerStatus.label} icon=${headerStatus.icon} tone=${headerStatus.tone} />
+      </div>
+
+      <main className="conversation-scroll">
+        ${history.length
+          ? history.map(
+              (session, index) => html`<${SessionTranscript}
+                key=${session.id || index}
+                session=${session}
+                error=${session.error}
+                onOpenAgent=${setSelectedAgent}
+              />`
+            )
+          : html`<div className="empty-thread">发送一条消息后，这里会按轮次保留完整问答记录。</div>`}
+      </main>
+
+      <div className="composer-dock">
+        <div className="composer-shell">
+          <label className="composer-input-wrap" aria-label="User Query">
+            <span className="composer-label">User Query</span>
+            <textarea
+              value=${query}
+              onChange=${(event) => setQuery(event.target.value)}
+              onKeyDown=${handleComposerKeyDown}
+              className="composer-area"
+              placeholder="给 Supervisor 输入一个需要拆解并调度多 worker 的任务"
+            ></textarea>
+          </label>
+          <div className="composer-actions composer-actions-minimal">
+            <button
+              type="button"
+              onClick=${loading ? handleStop : handleRun}
+              className=${`primary-button send-button ${loading ? "stop-button" : ""}`}
+              aria-label=${loading ? "停止执行" : "发送"}
+            >
+              ${loading ? html`<${Square} className="h-4 w-4" />` : html`<${ArrowUp} className="h-4 w-4" />`}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <${Modal}
+      open=${Boolean(selectedAgent)}
+      title=${selectedAgent ? `${selectedAgent.name} Metadata` : ""}
+      onClose=${() => setSelectedAgent(null)}
+    >
+      ${
+        selectedAgent
+          ? html`<div className="detail-grid modal-grid">
+              <${InfoCard} label="ID" value=${selectedAgent.id} />
+              <${InfoCard} label="Name" value=${selectedAgent.name} />
+              <${InfoCard} label="Role" value=${selectedAgent.role || "未定义"} />
+              <${InfoCard} label="Status" value=${stepLabel(selectedAgent.status)} />
+              <${InfoCard} label="Current task" value=${selectedAgent.current_task_title || "待命中"} wide=${true} />
+              <${InfoCard} label="Description" value=${selectedAgent.description || "未提供"} wide=${true} />
+              <${InfoCard} label="Recent report" value=${selectedAgent.report || "本轮尚未汇报"} wide=${true} />
+              <${InfoCard} label="Guard" value=${selectedAgent.last_guard_message || "最近没有 guard 拦截"} wide=${true} />
+            </div>`
+          : null
+      }
+    </${Modal}>
+
+    <${Modal} open=${showAddModal} title="新增子 Agent" onClose=${() => setShowAddModal(false)}>
+      <form className="form-stack" onSubmit=${handleCreateAgent}>
+        <${FormInput}
+          label="Agent ID"
+          value=${agentForm.name}
+          onChange=${(value) => setAgentForm((current) => ({ ...current, name: value }))}
+          placeholder="research_worker"
+        />
+        <${FormInput}
+          label="Display name"
+          value=${agentForm.display_name}
+          onChange=${(value) => setAgentForm((current) => ({ ...current, display_name: value }))}
+          placeholder="Research Worker"
+        />
+        <${FormInput}
+          label="Role"
+          value=${agentForm.role}
+          onChange=${(value) => setAgentForm((current) => ({ ...current, role: value }))}
+          placeholder="负责特定维度的信息收集与执行"
+        />
+        <${FormArea}
+          label="Description"
+          value=${agentForm.description}
+          onChange=${(value) => setAgentForm((current) => ({ ...current, description: value }))}
+          placeholder="用于处理一个被 supervisor 分配的独立维度任务。"
+          rows=${3}
+        />
+        <${FormArea}
+          label="System prompt"
+          value=${agentForm.system_prompt}
+          onChange=${(value) => setAgentForm((current) => ({ ...current, system_prompt: value }))}
+          placeholder="你是一个并行 worker..."
+          rows=${6}
+        />
+        <div className="composer-actions">
+          <button type="submit" className="primary-button">
+            <${Plus} className="h-4 w-4" />
+            创建子 Agent
+          </button>
+          ${formFeedback ? html`<div className="form-feedback">${formFeedback}</div>` : null}
+        </div>
+      </form>
+    </${Modal}>
+  </div>`;
+}
+
+function StatCard({ icon: Icon, label, value }) {
+  return html`<div className="stat-card">
+    <div className="stat-label">
+      <${Icon} className="h-4 w-4" />
+      <span>${label}</span>
+    </div>
+    <div className="stat-value">${value}</div>
+  </div>`;
+}
+
+function StatusCard({ icon: Icon, label, value, tone }) {
+  return html`<div className=${`stat-card status-card ${tone ? `is-${tone}` : ""}`}>
+    <div className="stat-label">
+      <${Icon} className=${`h-4 w-4 ${tone === "running" ? "animate-spin" : ""}`} />
+      <span>${label}</span>
+    </div>
+    <div className="stat-value">${value}</div>
+  </div>`;
+}
+
+function InfoCard({ label, value, wide = false }) {
+  return html`<div className=${`info-card ${wide ? "wide" : ""}`}>
+    <div className="info-label">${label}</div>
+    <div className="info-value">${value}</div>
+  </div>`;
+}
+
+function FormInput({ label, value, onChange, placeholder }) {
+  return html`<label className="form-field">
+    <div className="form-label">${label}</div>
+    <input value=${value} onChange=${(event) => onChange(event.target.value)} placeholder=${placeholder} className="field-control" />
+  </label>`;
+}
+
+function FormArea({ label, value, onChange, placeholder, rows }) {
+  return html`<label className="form-field">
+    <div className="form-label">${label}</div>
+    <textarea
+      rows=${rows}
+      value=${value}
+      onChange=${(event) => onChange(event.target.value)}
+      placeholder=${placeholder}
+      className="field-control field-area"
+    ></textarea>
+  </label>`;
+}
+
+const rootElement = document.getElementById("root");
+if (!rootElement) throw new Error("root_not_found");
+
+createRoot(rootElement).render(html`<${App} />`);
