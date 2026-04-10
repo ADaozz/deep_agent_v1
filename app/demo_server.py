@@ -6,6 +6,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from app.agent import get_subagent_catalog, register_subagent
+from app.backends import validate_docker_backend_access
 from app.config import load_settings
 from app.demo_session import run_demo_session_stream
 
@@ -97,7 +98,8 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
             self._send_json({"ok": True})
             return
         if self.path == "/api/demo/meta":
-            self._send_json({"agents": get_subagent_catalog()})
+            settings = load_settings(argv=[])
+            self._send_json({"agents": get_subagent_catalog(), "model": settings.model})
             return
         if self.path == "/":
             self.path = "/index.html"
@@ -136,9 +138,22 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
 
 
 def run_demo_server(host: str = "127.0.0.1", port: int = 8080) -> None:
+    settings = load_settings(argv=[])
+    if settings.backend == "docker":
+        validate_docker_backend_access(
+            container_name=settings.docker_container_name,
+            workspace_dir=settings.docker_workspace_dir,
+            timeout=min(settings.docker_timeout, 10),
+        )
+
     server = ThreadingHTTPServer((host, port), DemoRequestHandler)
     print(f"Demo server listening on http://{host}:{port}")
     print("POST /api/demo/run 会执行真实 create_deep_agent 调度。")
+    if settings.backend == "docker":
+        print(
+            "Docker backend 已通过启动自检："
+            f" container={settings.docker_container_name}, workspace={settings.docker_workspace_dir}"
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

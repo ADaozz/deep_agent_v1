@@ -17,7 +17,7 @@ EVIDENCE_TODO_SYSTEM_PROMPT = """## `write_evidence_todos`
 
 每个待办项都必须包含：
 - `content`：任务内容本身
-- `status`：`pending`、`in_progress` 或 `completed`
+- `status`：`pending`、`in_progress`、`completed` 或 `blocked`
 - `evidence`：完成该任务的具体证据
 - `evidence_type`：`file_observation`、`tool_result`、`command_result`、`subagent_report`、`reasoned_check` 之一
 
@@ -26,14 +26,27 @@ EVIDENCE_TODO_SYSTEM_PROMPT = """## `write_evidence_todos`
 2. 只有在能提供具体证据时，才允许把待办标记为 `completed`。
 3. 证据必须引用真实观察、工具输出、命令结果、文件内容或复核结论。
 4. 不要使用“已完成”“已检查”这类空泛证据。
-5. 如果任务未完成或被阻塞，就保持为 `pending` 或 `in_progress`。
-6. 在所有证据型待办都变成 `completed` 之前，不允许输出最终答案。
+5. 如果某一项因为环境、权限、依赖、目标条件等原因无法完成，必须标记为 `blocked`，并写清阻塞证据。
+6. 如果证据本身说明“无法执行”“缺少工具”“无法获取数据”等，就不能把该项标记为 `completed`。
+7. 只有当所有证据型待办都变成 `completed` 或 `blocked`，且每项都有充分证据时，才允许输出最终答案。
 """
+
+BLOCKED_EVIDENCE_INDICATORS = (
+    "缺少工具",
+    "系统中无",
+    "无法安装工具",
+    "无法执行命令",
+    "权限被拒绝",
+    "认证失败",
+    "执行环境受限",
+    "被守卫拦截",
+    "docker exec 失败",
+)
 
 
 class EvidenceTodo(TypedDict):
     content: str
-    status: Literal["pending", "in_progress", "completed"]
+    status: Literal["pending", "in_progress", "completed", "blocked"]
     evidence: str
     evidence_type: Literal[
         "file_observation",
@@ -50,7 +63,7 @@ class EvidencePlanningState(PlanningState[Any]):
 
 class EvidenceTodoItem(BaseModel):
     content: str = Field(description="待办项的内容描述。")
-    status: Literal["pending", "in_progress", "completed"] = Field(
+    status: Literal["pending", "in_progress", "completed", "blocked"] = Field(
         description="该待办项的当前状态。"
     )
     evidence: str = Field(
@@ -157,14 +170,27 @@ class EvidenceTodoMiddleware(AgentMiddleware[EvidencePlanningState, Any, Any]):
             status = todo.get("status")
             content = todo.get("content", "")
             evidence = todo.get("evidence", "").strip()
-            if status != "completed":
+            if status == "completed":
+                if not evidence:
+                    invalid.append(f"{content}: 缺少证据")
+                    continue
+                if len(evidence) < 12:
+                    invalid.append(f"{content}: 证据过弱")
+                    continue
+                if _evidence_sounds_blocked(evidence):
+                    invalid.append(f"{content}: 证据表明该项受阻，应标记为 blocked")
+                    continue
+                continue
+            if status == "blocked":
+                if not evidence:
+                    invalid.append(f"{content}: 缺少阻塞证据")
+                    continue
+                if len(evidence) < 12:
+                    invalid.append(f"{content}: 阻塞证据过弱")
+                    continue
+                continue
+            if status not in {"completed", "blocked"}:
                 invalid.append(f"{content}: 状态为 {status}")
-                continue
-            if not evidence:
-                invalid.append(f"{content}: 缺少证据")
-                continue
-            if len(evidence) < 12:
-                invalid.append(f"{content}: 证据过弱")
 
         if not invalid:
             return None
@@ -172,7 +198,7 @@ class EvidenceTodoMiddleware(AgentMiddleware[EvidencePlanningState, Any, Any]):
         message = (
             "运行时守卫：你现在还不能结束，因为你的私有证据型待办列表中仍有未解决项："
             f"{invalid}。请更新 `write_evidence_todos`，确保每一项都带有具体证据并标记为 "
-            "`completed`，然后再返回最终答案。"
+            "`completed` 或 `blocked`；如果证据本身说明该项无法执行或无法获取结果，必须使用 `blocked`，然后再返回最终答案。"
         )
         return {
             "messages": [HumanMessage(content=message)],
@@ -181,3 +207,8 @@ class EvidenceTodoMiddleware(AgentMiddleware[EvidencePlanningState, Any, Any]):
 
 
 EvidenceTodoMiddleware.after_agent.__can_jump_to__ = ["model"]
+
+
+def _evidence_sounds_blocked(evidence: str) -> bool:
+    lowered = evidence.lower()
+    return any(indicator in lowered for indicator in BLOCKED_EVIDENCE_INDICATORS)

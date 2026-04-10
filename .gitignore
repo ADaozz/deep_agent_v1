@@ -11,3 +11,7 @@ __pycache__/
 *.pyc
 
 runtime_logs/
+
+# sandbox workspace (keep folder via workspace/.gitkeep)
+workspace/*
+!workspace/.gitkeep
