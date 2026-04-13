@@ -14,13 +14,12 @@ from app.agent.todo_enforcer import EvidenceTodoMiddleware
 from app.backends import DockerWorkspaceBackend
 from app.config import Settings
 from app.prompts import (
-    RUNTIME_WORKER_PLANNER_PROMPT,
     build_supervisor_system_prompt,
+    get_runtime_worker_planner_prompt,
 )
-from app.tools import make_generate_subagents_tool, ssh_execute
+from app.tools import make_generate_subagents_tool, publish_workspace_file, ssh_execute
 
 
-_EXTRA_SUBAGENT_DEFS: list[dict[str, str]] = []
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE_ROOT = PROJECT_ROOT / "workspace"
 
@@ -87,21 +86,6 @@ def _disabled_fallback_spec() -> dict[str, Any]:
     )
 
 
-def _registered_subagent_specs() -> list[dict[str, Any]]:
-    return [
-        _build_subagent_spec(
-            name=item["name"],
-            display_name=item["display_name"],
-            description=item["description"],
-            role=item["role"],
-            system_prompt=item["system_prompt"],
-            tools=_worker_tools(),
-            dynamic=True,
-        )
-        for item in _EXTRA_SUBAGENT_DEFS
-    ]
-
-
 def _catalog_item(spec: dict[str, Any]) -> dict[str, str]:
     return {
         "id": spec["name"],
@@ -112,43 +96,7 @@ def _catalog_item(spec: dict[str, Any]) -> dict[str, str]:
 
 
 def get_subagent_specs() -> list[dict[str, Any]]:
-    return [_disabled_fallback_spec(), *_registered_subagent_specs()]
-
-
-def get_subagent_catalog() -> list[dict[str, str]]:
-    return [
-        _catalog_item(spec)
-        for spec in get_subagent_specs()
-        if spec["name"] != "general-purpose"
-    ]
-
-
-def register_subagent(
-    *,
-    name: str,
-    display_name: str,
-    role: str,
-    description: str,
-    system_prompt: str,
-) -> dict[str, str]:
-    normalized_name = _sanitize_agent_name(name, {spec["name"] for spec in get_subagent_specs()})
-    if any(spec["name"] == normalized_name for spec in get_subagent_specs()):
-        raise ValueError(f"subagent '{normalized_name}' already exists")
-
-    entry = {
-        "name": normalized_name,
-        "display_name": display_name.strip() or _fallback_display_name(normalized_name, 1),
-        "role": role.strip(),
-        "description": description.strip(),
-        "system_prompt": system_prompt.strip(),
-    }
-    _EXTRA_SUBAGENT_DEFS.append(entry)
-    return {
-        "id": entry["name"],
-        "name": entry["display_name"],
-        "role": entry["role"],
-        "description": entry["description"],
-    }
+    return [_disabled_fallback_spec()]
 
 
 def build_agent(settings: Settings, query: str | None = None):
@@ -186,7 +134,7 @@ def build_agent_bundle(
     backend = _make_backend(settings)
     agent = create_deep_agent(
         model=model,
-        tools=[generate_subagents_tool],
+        tools=[generate_subagents_tool, publish_workspace_file],
         subagents=subagents,
         system_prompt=system_prompt,
         backend=backend,
@@ -207,14 +155,12 @@ def _build_runtime_subagent_specs(
         runtime_plan=runtime_plan,
         existing_specs=base_specs,
     )
-    registered_specs = [spec for spec in base_specs if spec["name"] != "general-purpose"]
     runtime_specs = [*base_specs, *auto_worker_specs]
-    roster_specs = [*registered_specs, *auto_worker_specs]
+    roster_specs = list(auto_worker_specs)
     roster_payload = {
         "delegation_needed": bool(roster_specs),
         "reasoning": _build_roster_reasoning(
             runtime_plan=runtime_plan,
-            registered_specs=registered_specs,
             auto_worker_specs=auto_worker_specs,
         ),
         "planner_error": runtime_plan.planner_error.strip(),
@@ -229,19 +175,10 @@ def _plan_query_workers(
     query: str,
     existing_specs: list[dict[str, Any]],
 ) -> RuntimeWorkerPlan:
-    registered_workers = [
-        spec for spec in existing_specs if spec["name"] != "general-purpose"
-    ]
-    registered_workers_text = "\n".join(
-        f"- {spec['name']} / {spec['display_name']}：{spec['role']}。{spec['description']}"
-        for spec in registered_workers
-    )
-
     planner = model.with_structured_output(RuntimeWorkerPlan, include_raw=True)
     try:
         result = planner.invoke(
-            RUNTIME_WORKER_PLANNER_PROMPT.format(
-                registered_workers=registered_workers_text or "- 当前没有长期注册 worker。",
+            get_runtime_worker_planner_prompt().format(
                 query=query,
             )
         )
@@ -319,7 +256,9 @@ def _build_auto_worker_specs(
             "你是一个由 supervisor 针对当前 query 准备的专属并行 worker。"
             "收到任务后，必须先调用 write_evidence_todos 创建私有证据型待办列表。"
             "你只负责自己这个维度，不要越界总结全局。"
-            "`execute` 只用于本地 sandbox / workspace 内的命令操作，不能当作 SSH 或远程执行工具。"
+            "`execute` 只用于本地沙箱中的当前文件根目录命令操作，不能当作 SSH 或远程执行工具。"
+            "当前文件系统工具已经把你放在文件根目录中，文件路径只能写 foo.py、subdir/foo.py、report.md 这类相对路径。"
+            "不要给路径补任何根目录名、绝对路径前缀或重复目录层级；运行本地脚本时也只能使用 python3 foo.py 或 python3 subdir/foo.py。"
             "如果任务涉及远程主机访问、远程目录检查、远程日志排查或远程服务探测，优先使用 ssh_execute。"
             "所有待办完成并附带 evidence 后，才能向 supervisor 汇报。"
         )
@@ -340,16 +279,11 @@ def _build_auto_worker_specs(
 def _build_roster_reasoning(
     *,
     runtime_plan: RuntimeWorkerPlan,
-    registered_specs: list[dict[str, Any]],
     auto_worker_specs: list[dict[str, Any]],
 ) -> str:
     base_reasoning = runtime_plan.reasoning.strip()
     if auto_worker_specs:
         return base_reasoning or "当前 query 已生成一组本轮专属 worker。"
-    if registered_specs:
-        if base_reasoning:
-            return f"{base_reasoning} 当前仍可使用已注册的长期 worker。"
-        return "当前没有额外生成本轮专属 worker，但仍可使用已注册的长期 worker。"
     return base_reasoning or "当前 query 不需要额外 worker，可由 supervisor 直接处理。"
 
 

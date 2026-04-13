@@ -2,12 +2,31 @@
 
 一个基于 `create_deep_agent` 的真实多 Agent 协同调度 Demo。
 
+这个项目同时面向两类读者：
+
+- 用户：想先直观看到“一个问题如何被拆解、派发、执行、收敛、生成文件”
+- 开发者：想了解这套多 Agent Demo 如何基于真实 `create_deep_agent`、流式事件和前端状态收集搭建起来
+
 项目包含两套入口：
 
 - CLI 运行模式：直接在终端里观察 `create_deep_agent` 的流式执行过程
 - Web Demo 模式：通过一个零构建前端页面可视化展示 Supervisor、Action List、Round、Worker checklist、Execution Log 和 Final Summary
 
 这个仓库的重点不是“静态模拟多 agent UI”，而是把真实 `create_deep_agent` 调度过程解析成前端可消费的结构化状态。
+
+## Clone 前建议先看
+
+如果你还没有运行项目，建议先按下面顺序快速浏览：
+
+1. `img/主题1.jpg` 和 `img/主题2.jpg`
+   - 先了解首页整体布局、对话结构和主题效果
+2. `Supervisor Conversation Runtime.html`
+   - 这是一次完整运行流程的导出结果
+   - 可以直接看到用户提问、Action List、Worker 协作、Round 收敛、Execution Log、Final Summary、文件卡片的完整链路
+3. `img/文件预览md.png` 和 `img/文件预览xlsx.png`
+   - 分别展示文本类文件与表格类文件在前端的预览形态
+
+如果你的目标是先判断这个项目值不值得 clone，优先看 `Supervisor Conversation Runtime.html`。它比单张截图更能说明整个系统到底“怎么跑”。
 
 ## 主页效果图
 
@@ -17,14 +36,42 @@
 
 ![主页效果图（主题2）](img/主题2.jpg)
 
+## 文件预览效果图
+
+下面两张截图展示了前端文件卡片点击后的两类文件预览效果。
+
+Markdown / 文本类文件预览：
+
+![Markdown 文件预览效果图](img/文件预览md.png)
+
+Excel / 表格类文件预览：
+
+![Excel 文件预览效果图](img/文件预览xlsx.png)
+
 ## 完整测试流程（导出结果）
 
-`Supervisor Conversation Runtime.html` 是一次完整测试流程的导出结果，包含当次会话内的 Action List、Round Trace、Worker checklist、Execution Log 与最终输出等信息。
+`Supervisor Conversation Runtime.html` 是一次完整测试流程的导出结果，包含当次会话内的 Action List、Round Trace、Worker checklist、Execution Log、Final Summary 与文件产物展示等信息。
+
+这份导出页不仅是留档文件，更是这个项目最直观的运行说明：
+
+- 对用户：在 clone 之前就能看到系统如何从一个 query 进入真实多 Agent 运行流程
+- 对开发者：可以直接观察 supervisor 如何拆分任务、动态生成 worker、派发任务、收敛结果并发布文件
+- 对演示场景：它比静态截图更适合展示完整交互链路
 
 - 入口文件：`Supervisor Conversation Runtime.html`
 - 资源目录：`Supervisor Conversation Runtime_files/`
 
 本地查看时直接用浏览器打开 `Supervisor Conversation Runtime.html` 即可（需要同目录下的 `_files/` 资源目录同时存在）。
+
+这份导出通常会覆盖以下信息：
+
+- 用户 query 与多轮对话上下文
+- supervisor 写出的主任务列表
+- 本轮动态 worker 的身份、职责与 checklist
+- round dispatch / convergence 过程
+- 最近 60 条运行日志
+- 最终回答
+- 生成文件的前端卡片展示
 
 ## 主要能力
 
@@ -35,7 +82,11 @@
 - 将“业务受阻”和“系统错误”分开建模，避免把目标不可达误判成程序报错
 - 支持真实流式事件订阅：`updates`、`messages`、`custom`
 - 支持前端多轮对话
-- 支持运行时注册长期子 Agent，同时支持按 query 生成动态 worker
+- 支持 PostgreSQL 持久化会话历史、线程级 UI 状态与历史线程切换
+- 支持按 query 动态生成专属 worker
+- 支持前端提示词中心：预览、编辑、保存、恢复默认
+- 支持将 `workspace/` 内文件发布为前端文件卡片，并在会话中预览 / 下载 / 文本类文件保存
+- 支持把生成结果直接作为会话内文件卡片展示，便于用户在一次运行结束后立刻查看 Markdown / 文本类 / 表格类产物
 - 支持 Markdown / Mermaid 格式的最终回答渲染
 - 落盘结构化 JSONL 运行日志，便于后续排查和审计
 
@@ -55,19 +106,26 @@ deep_agent_v1/
 │   ├── tools/
 │   │   ├── __init__.py
 │   │   ├── ssh_remote.py
-│   │   └── subagent_roster.py
+│   │   ├── subagent_roster.py
+│   │   └── workspace_artifacts.py
 │   ├── config.py
+│   ├── chat_history_store.py
 │   ├── demo_server.py
 │   ├── demo_session.py
 │   ├── logging_utils.py
 │   ├── prompts.py
+│   ├── workspace_files.py
 │   └── runner.py
 ├── frontend_demo/
 │   ├── app.js
 │   ├── index.html
 │   └── styles.css
 ├── runtime_logs/
+├── docker-compose.yaml
 ├── img/
+├── postgres/
+│   ├── docker-compose.yml
+│   └── init.sql
 ├── Supervisor Conversation Runtime.html
 ├── Supervisor Conversation Runtime_files/
 ├── main.py
@@ -78,7 +136,7 @@ deep_agent_v1/
 
 ## 项目架构
 
-当前实现可以理解为四层：
+当前实现可以理解为五层：
 
 1. Agent 组装层
    - [builder.py](/mnt/d/pycode/agent/deep_agent_v1/app/agent/builder.py)
@@ -96,7 +154,12 @@ deep_agent_v1/
    - [stream_logger.py](/mnt/d/pycode/agent/deep_agent_v1/app/streaming/stream_logger.py)
    - 负责把原始 LangGraph stream 转成前端状态、Execution Log 和结构化 JSONL 事件
 
-4. 交互展示层
+4. 持久化与会话层
+   - [chat_history_store.py](/mnt/d/pycode/agent/deep_agent_v1/app/chat_history_store.py)
+   - 负责把会话历史、线程级 UI 状态持久化到 PostgreSQL
+   - 支持恢复最近线程、列出历史线程、恢复前端控件状态
+
+5. 交互展示层
    - [demo_server.py](/mnt/d/pycode/agent/deep_agent_v1/app/demo_server.py)
    - [app.js](/mnt/d/pycode/agent/deep_agent_v1/frontend_demo/app.js)
    - [styles.css](/mnt/d/pycode/agent/deep_agent_v1/frontend_demo/styles.css)
@@ -144,15 +207,26 @@ deep_agent_v1/
 - `app/demo_session.py`
   - Web Demo 的核心执行与状态收集器
   - 把真实 stream 转成前端可视状态
-  - 维护 `tasks / rounds / agents / logs / final_summary`
+  - 维护 `tasks / rounds / agents / files / logs / final_summary`
   - 把原始工具调用和 round 收敛过程写成结构化 JSONL 事件
   - 只有当 supervisor 真正 `task` 派发后，才会在 collector 中物化对应 worker
+  - 支持把 `publish_workspace_file` 工具结果转成前端文件卡片
+  - 当模型漏掉发布工具但在最终答复里写出 `workspace` 路径时，会尝试自动补文件卡片
 
 - `app/demo_server.py`
   - 一个基于 `ThreadingHTTPServer` 的轻量 HTTP 服务
   - 提供前端页面和 API
-  - `/api/demo/meta` 返回当前模型名和长期注册 worker 元数据
+  - `/api/demo/meta` 返回当前模型名
   - `/api/demo/run` 返回 NDJSON 流式状态快照
+  - `/api/demo/history` / `/api/demo/history/threads` / `/api/demo/thread-state` 提供历史线程与 UI 状态持久化
+  - `/api/demo/prompts` / `/api/demo/prompts/reset` 提供提示词读取与热更新
+  - `/api/demo/workspace-file` 提供 `workspace/` 文件的预览、下载与文本类文件保存
+
+- `app/chat_history_store.py`
+  - PostgreSQL 会话持久化层
+  - 保存 `thread_id / session_id / payload / error_text`
+  - 额外保存线程级 `ui_state`
+  - 支持列出历史线程、恢复最近会话
 
 - `app/runner.py`
   - CLI 模式运行入口
@@ -168,6 +242,8 @@ deep_agent_v1/
   - 整个 Demo 页面逻辑
   - 负责流式消费 `/api/demo/run`
   - 负责多轮会话状态管理
+  - 使用统一的 `uiState` 对象维护主题、输入框、当前弹窗、当前选中 agent / 文件等前端状态
+  - 支持历史会话侧栏、提示词中心、文件卡片与文件预览弹窗
   - 负责渲染：
     - 顶部状态卡片
     - User Query
@@ -176,6 +252,7 @@ deep_agent_v1/
     - Round Trace
     - Execution Log
     - Final Summary
+    - Workspace Files
 
 - `frontend_demo/styles.css`
   - 页面样式与主题
@@ -200,6 +277,8 @@ deep_agent_v1/
 12. collector 根据 worker 回报把状态归类为 `done / blocked / error`
 13. 当一轮所有派发任务收敛后，supervisor 决定是否继续下一轮，或直接生成最终回答
 14. collector 把真实运行状态实时转换成 NDJSON 快照推给前端
+15. 如果运行过程中生成了 `workspace/` 内的文件，supervisor 应调用 `publish_workspace_file`，前端会把它渲染为文件卡片
+16. 文本类文件可以在前端弹窗里预览、编辑、保存；二进制文件只展示元信息并下载
 
 几个关键约束：
 
@@ -219,8 +298,6 @@ deep_agent_v1/
 - 名称随任务变化
 - 角色随任务变化
 - 描述和提示词随任务变化
-
-如果用户通过 `/api/demo/subagents` 注册了长期子 Agent，这些长期 worker 会与“本轮专属 worker”一起进入当次运行名册。
 
 ### 2. 生成时机与展示时机不同
 
@@ -291,6 +368,39 @@ pip install -r requirements.txt
 
 项目启动时会自动读取根目录下的 `.env`。
 
+## Docker 目录与统一编排
+
+项目里与容器相关的文件现在分成两部分：
+
+- 根目录 [docker-compose.yaml](/mnt/d/pycode/agent/deep_agent_v1/docker-compose.yaml)
+  - 统一编排 `deep-agent-sandbox` 与 `postgresql`
+- [postgres/](/mnt/d/pycode/agent/deep_agent_v1/postgres/)
+  - `init.sql`：PostgreSQL 初始化脚本
+  - `docker-compose.yml`：legacy 配置，仅保留为“单独启动 PostgreSQL”的历史参考；推荐直接使用根目录总 compose
+
+当前推荐的启动方式是使用根目录总 compose：
+
+```bash
+docker compose up -d
+```
+
+说明：
+
+- [postgres/docker-compose.yml](/mnt/d/pycode/agent/deep_agent_v1/postgres/docker-compose.yml) 是 legacy 配置
+- 推荐改用根目录 [docker-compose.yaml](/mnt/d/pycode/agent/deep_agent_v1/docker-compose.yaml)
+- 除非你只想单独调试 PostgreSQL，否则不要优先使用 `postgres/docker-compose.yml`
+
+这会同时启动：
+
+- `deep-agent-sandbox`
+  - 供 `DEEP_AGENT_BACKEND=docker` 时的 `execute` 使用
+  - 将本地 `./workspace` 挂载到容器内 `/workspace`
+
+- `postgresql`
+  - 提供聊天历史与 UI 状态持久化
+  - 启动时自动执行 [postgres/init.sql](/mnt/d/pycode/agent/deep_agent_v1/postgres/init.sql)
+  - 当前 `init.sql` 会初始化 `vector` 扩展
+
 ### 必需环境变量
 
 至少配置以下之一：
@@ -314,6 +424,13 @@ DASHSCOPE_MODEL=
 # Logging
 LOG_LEVEL=INFO
 DEEP_AGENT_LOG_FILE=runtime_logs/deep_agent_stream.jsonl
+
+# PostgreSQL chat history
+DEEP_AGENT_PG_HOST=127.0.0.1
+DEEP_AGENT_PG_PORT=5432
+DEEP_AGENT_PG_USER=postgresql
+DEEP_AGENT_PG_PASSWORD=postgresql
+DEEP_AGENT_PG_DATABASE=postgresql
 
 # Backend mode
 DEEP_AGENT_BACKEND=filesystem
@@ -352,6 +469,7 @@ DASHSCOPE_MODEL=qwen3.5-plus
 - `base_url` 优先读 `OPENAI_BASE_URL`，否则读 `DASHSCOPE_BASE_URL`
 - backend 默认取 `DEEP_AGENT_BACKEND=filesystem`
 - SSH 工具默认从 `.env` 读取 `DEEP_AGENT_SSH_*`
+- PostgreSQL 会话持久化默认从 `.env` 读取 `DEEP_AGENT_PG_*`
 
 如果没有 API Key，启动会直接报错。
 
@@ -379,12 +497,44 @@ DEEP_AGENT_DOCKER_TIMEOUT=120
 对应容器示例：
 
 ```bash
-docker run -d --rm \
-  --name deep-agent-sandbox \
-  -v /mnt/d/pycode/agent/deep_agent_v1/workspace:/workspace \
-  -w /workspace \
-  python:3.13-slim \
-  sleep infinity
+docker compose up -d deep-agent-sandbox
+```
+
+如果你希望连同 PostgreSQL 一起启动，直接执行：
+
+```bash
+docker compose up -d
+```
+
+根目录总 compose 的核心内容如下：
+
+```yaml
+services:
+  deep-agent-sandbox:
+    image: python:3.13-slim
+    container_name: deep-agent-sandbox
+    working_dir: /workspace
+    command: sleep infinity
+    restart: unless-stopped
+    volumes:
+      - ./workspace:/workspace
+
+  postgresql:
+    image: pgvector/pgvector:pg17
+    container_name: postgresql
+    environment:
+      POSTGRES_USER: postgresql
+      POSTGRES_PASSWORD: postgresql
+      POSTGRES_DB: postgresql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+volumes:
+  pg_data:
 ```
 
 ### `execute` 的运行边界
@@ -482,12 +632,92 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
   - 适合一次性远程执行聚焦命令，不适合长会话和交互式命令
   - 当前只暴露给 worker，作为“落地执行能力”使用
 
+- `publish_workspace_file(relative_path, title="")`
+  - 不是框架默认工具
+  - 由 [workspace_artifacts.py](/mnt/d/pycode/agent/deep_agent_v1/app/tools/workspace_artifacts.py) 提供
+  - 只暴露给 supervisor
+  - 用于把 `workspace/` 下已存在的文件发布成前端会话里的文件卡片
+  - 适合 markdown、txt、py、json、csv、xlsx 等结果文件
+
 补充说明：
 
 - supervisor 除了框架内置工具外，还会额外获得 `generate_subagents`（名册工具）；它不挂载远程执行工具
+- supervisor 还会额外挂载 `publish_workspace_file`，用于发布结果文件卡片
 - worker 在框架内置工具之外，会额外获得 `ssh_execute`
 - worker 运行时虽然仍然天然带有框架内置 `write_todos`，但本项目的 worker 提示词、前端展示和完成守卫都以 `write_evidence_todos` 为准
 - 如果你要观察真正影响 worker 完成态的 checklist，请看 worker 私有 `todo_list`，不要把它和 supervisor 的主 `Action List` 混在一起
+
+## Web Demo 扩展能力
+
+### 1. 历史会话与 UI 状态持久化
+
+- 聊天历史会持久化到 PostgreSQL
+- 每个线程除了会话内容，还会保存线程级 `ui_state`
+- `ui_state` 当前覆盖：
+  - 当前主题
+  - 输入框内容
+  - 当前选中的提示词模块
+  - 当前提示词编辑草稿
+  - 当前选中的 agent / 文件
+- 前端支持从历史线程列表切换线程，并恢复对应 UI 状态
+- 历史线程支持删除，并带页面内二次确认弹窗
+- 删除当前线程时，会自动切换到最近一条剩余线程，或创建一个新的空线程
+- 历史 / 提示词 / 文件弹窗属于临时 UI 状态，刷新页面后不会自动恢复为打开状态
+
+### 2. 提示词管理中心
+
+左侧“提示词”按钮打开后，可以直接在前端：
+
+- 预览当前核心提示词
+- 编辑提示词
+- 保存提示词
+- 恢复默认提示词
+
+当前支持管理的提示词包括：
+
+- 默认用户提示词
+- 运行时 worker 规划器提示词
+- supervisor 系统提示词
+- worker evidence todo 守卫提示词
+
+提示词保存是“进程内热更新”：
+
+- 不需要重启 `serve_demo.py`
+- 对后续新任务立即生效
+- 但服务重启后仍会回到代码中的默认值
+
+### 3. 文件产物卡片
+
+如果 supervisor 在 `workspace/` 中生成了结果文件，并调用 `publish_workspace_file`，前端会在会话底部渲染文件卡片。
+
+当前文件卡片能力：
+
+- 支持多个文件并排展示
+- 支持点击卡片打开文件弹窗
+- 支持下载原始文件
+
+当前文件弹窗能力：
+
+- Markdown / 纯文本 / 代码文本：预览、编辑、保存、下载
+- 图片 / PDF：预览、下载
+- Excel / 其他二进制文件：显示文件信息并下载，不做错误的文本预览
+
+另外，collector 还提供一个兜底：
+
+- 如果模型漏掉了 `publish_workspace_file`
+- 但在最终答复里写出了 `workspace/...` 或 `/workspace/...` 路径
+- 系统会尝试自动把它补成文件卡片
+
+### 4. 运行态交互
+
+当前 Web Demo 还包含一组运行态交互约束：
+
+- 对话执行过程中，底部输入框会自动收起，只保留停止按钮
+- 执行过程中左侧“历史会话”和“提示词管理”按钮会被禁用
+- 执行过程中如果直接点击“新会话”，会先中断当前流式运行，再切换到新的线程
+- 已完成状态的 round / worker 面板默认自动收起
+- `Execution Log` 默认收起，避免长日志干扰主对话流
+- `Execution Log` 前端仅展示最近 60 条事件
 
 ## CLI 模式
 
@@ -556,13 +786,18 @@ python3 serve_demo.py --host 0.0.0.0 --port 8080
   - Action List
   - Workers And Checklists
   - Round Trace
-  - Execution Log
+  - Execution Log（前端仅展示最近 60 条）
   - Final Summary
 
 - 底部输入框
   - Enter 发送
   - Shift+Enter 换行
-  - 执行时按钮切换为停止按钮
+  - 执行时输入框自动收起，仅保留停止按钮
+
+- 左侧菜单
+  - 历史会话
+  - 提示词管理
+  - 执行中禁用，避免打断当前运行态
 
 ### 前端特点
 
@@ -586,29 +821,7 @@ python3 serve_demo.py --host 0.0.0.0 --port 8080
 
 ### `GET /api/demo/meta`
 
-获取当前模型名和长期注册子 Agent 元数据。
-
-注意：
-
-- 这里返回的是“长期注册 worker 名册”
-- 不包含“本轮 query 专属动态 worker”
-- 本轮动态 worker 只会在 `POST /api/demo/run` 时按 query 生成
-
-### `POST /api/demo/subagents`
-
-动态创建子 Agent。
-
-请求体：
-
-```json
-{
-  "name": "research_worker",
-  "display_name": "Research Worker",
-  "role": "负责某个独立维度的调研",
-  "description": "用于处理 supervisor 拆分出的独立问题",
-  "system_prompt": "你是一个并行 worker..."
-}
-```
+获取当前模型名。
 
 ### `POST /api/demo/run`
 
@@ -632,6 +845,17 @@ python3 serve_demo.py --host 0.0.0.0 --port 8080
 - `application/x-ndjson`
 
 每一行都是一个事件对象，前端按流式更新状态。
+
+### `DELETE /api/demo/history?thread_id=...`
+
+删除指定历史线程。
+
+行为说明：
+
+- 会同时删除该线程下的会话历史与线程级 `ui_state`
+- 删除前会弹出页面内二次确认弹窗
+- 如果删除的是当前线程，前端会自动切换到最近一条剩余线程
+- 如果已经没有剩余线程，前端会自动创建一个新的空线程
 
 ## 状态模型
 

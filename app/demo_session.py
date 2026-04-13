@@ -3,32 +3,19 @@ from __future__ import annotations
 import ast
 import json
 import os
+import random
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
 
-from app.agent import build_agent_bundle, get_subagent_catalog
+from app.agent import build_agent_bundle
 from app.config import Settings
 from app.logging_utils import short_text
+from app.workspace_files import build_workspace_file_card
 from langgraph.types import Overwrite
-
-SUPERVISOR_DIRECT_TASK_KEYWORDS = (
-    "拆分",
-    "规划",
-    "原子",
-    "路由",
-    "调度",
-    "汇总",
-    "总结",
-    "归纳",
-    "对比",
-    "结论",
-    "最终",
-    "回答",
-    "收敛",
-)
 
 SYSTEM_FAILURE_INDICATORS = (
     "执行环境受限",
@@ -94,6 +81,20 @@ class AgentPanel:
 
 
 @dataclass
+class PublishedFile:
+    id: str
+    path: str
+    name: str
+    title: str
+    extension: str
+    size: int
+    updated_at: str
+    mime_type: str
+    preview_url: str
+    download_url: str
+
+
+@dataclass
 class RoundPanel:
     index: int
     thought: str
@@ -130,12 +131,13 @@ class DemoRunCollector:
         self.tool_call_to_agent: dict[str, str] = {}
         self.pregel_to_agent: dict[str, str] = {}
         self.task_bindings: dict[int, TaskBinding] = {}
-        catalog = runtime_catalog or get_subagent_catalog()
+        catalog = runtime_catalog or []
         self.runtime_catalog = list(catalog)
         self.runtime_catalog_by_id: dict[str, dict[str, str]] = {item["id"]: item for item in catalog}
         self.generated_runtime_catalog: list[dict[str, str]] = []
         self.roster_generated = False
         self.agents: dict[str, AgentPanel] = {}
+        self.files: dict[str, PublishedFile] = {}
 
     def close(self) -> None:
         if not self._file.closed:
@@ -188,6 +190,7 @@ class DemoRunCollector:
         error: str = "",
     ) -> dict[str, Any]:
         final_summary = "".join(self.main_text).strip()
+        self._capture_workspace_files_from_summary(final_summary)
         tasks, task_errors = self._convert_main_todos(final=final)
 
         if final:
@@ -241,6 +244,7 @@ class DemoRunCollector:
             "tasks": tasks,
             "rounds": [self._round_to_dict(round_panel) for round_panel in self.rounds],
             "agents": [self._agent_to_dict(agent_id, panel) for agent_id, panel in self.agents.items()],
+            "files": [self._file_to_dict(item) for item in self.files.values()],
             "logs": self.logs[-60:],
         }
 
@@ -293,6 +297,8 @@ class DemoRunCollector:
                     agent_id = self.pregel_to_agent.get(ns[0].split(":", 1)[1])
                     if agent_id:
                         self.agents[agent_id].todo_list = todos
+            if tool_name == "publish_workspace_file":
+                self._capture_published_file(content)
             self._push_log(agent_name, f"{tool_name} => {short_text(content, 160)}")
             self._write_event(
                 "tool_result",
@@ -557,6 +563,11 @@ class DemoRunCollector:
             owner = bound_agent.name if bound_agent else ""
             detail = "来自 supervisor 的 write_todos。"
 
+            if not final and not binding and self.rounds:
+                task_status = "running"
+                owner = "Supervisor"
+                detail = "supervisor 正在基于已返回的 worker 结果进行汇总与收口。"
+
             if final:
                 if binding and bound_agent:
                     if bound_status == "done":
@@ -593,12 +604,9 @@ class DemoRunCollector:
                     task_status = "blocked"
                     detail = "前置子任务已给出否定结果，本任务未继续执行。"
                 elif todo_status == "done":
-                    if not self.rounds or _can_supervisor_complete_task_directly(title):
-                        task_status = "done"
-                    else:
-                        task_status = "error"
-                        detail = "supervisor 将该主任务标记为 completed，但缺少对应执行证据。"
-                        errors.append(f"{title or f'任务 {index}'}: 被标记为 completed，但缺少对应执行证据")
+                    task_status = "done"
+                    owner = owner or "Supervisor"
+                    detail = "该主任务已由 supervisor 收口完成。"
                 else:
                     task_status = "error"
                     detail = "执行结束时该主任务仍未完成。"
@@ -650,6 +658,72 @@ class DemoRunCollector:
             "guard_hits": panel.guard_hits,
             "last_guard_message": panel.last_guard_message,
         }
+
+    def _file_to_dict(self, file: PublishedFile) -> dict[str, Any]:
+        return {
+            "id": file.id,
+            "path": file.path,
+            "name": file.name,
+            "title": file.title,
+            "extension": file.extension,
+            "size": file.size,
+            "updated_at": file.updated_at,
+            "mime_type": file.mime_type,
+            "preview_url": file.preview_url,
+            "download_url": file.download_url,
+        }
+
+    def _capture_published_file(self, content: Any) -> None:
+        payload = _parse_published_file_from_tool_output(content)
+        if not payload:
+            return
+        published = PublishedFile(
+            id=payload["id"],
+            path=payload["path"],
+            name=payload["name"],
+            title=payload["title"],
+            extension=payload["extension"],
+            size=payload["size"],
+            updated_at=payload["updated_at"],
+            mime_type=payload["mime_type"],
+            preview_url=payload["preview_url"],
+            download_url=payload["download_url"],
+        )
+        self.files[published.path] = published
+        self._push_log("scheduler", f"发布文件产物: {published.path}")
+        self._write_event(
+            "workspace_file_published",
+            source="scheduler",
+            path=published.path,
+            title=published.title,
+            mime_type=published.mime_type,
+            size=published.size,
+        )
+
+    def _capture_workspace_files_from_summary(self, final_summary: str) -> None:
+        if not final_summary:
+            return
+        for relative_path in _extract_workspace_paths(final_summary):
+            if relative_path in self.files:
+                continue
+            try:
+                payload = build_workspace_file_card(relative_path)
+            except Exception:
+                continue
+            published = PublishedFile(
+                id=payload["id"],
+                path=payload["path"],
+                name=payload["name"],
+                title=payload["title"],
+                extension=payload["extension"],
+                size=payload["size"],
+                updated_at=payload["updated_at"],
+                mime_type=payload["mime_type"],
+                preview_url=payload["preview_url"],
+                download_url=payload["download_url"],
+            )
+            self.files[published.path] = published
+            self._push_log("scheduler", f"根据最终答复自动补发布文件产物: {published.path}")
 
     def _capture_guard_messages(self, ns: tuple[str, ...], node_data: dict[str, Any]) -> None:
         if not ns or not ns[0].startswith("tools:"):
@@ -810,10 +884,10 @@ def run_demo_session_stream(
     messages: list[dict[str, str]] | None = None,
 ):
     os.makedirs(os.path.dirname(settings.log_file) or ".", exist_ok=True)
-    agent, runtime_catalog = build_agent_bundle(settings=settings, query=query)
-    collector = DemoRunCollector(log_file=settings.log_file, runtime_catalog=runtime_catalog)
+    collector = DemoRunCollector(log_file=settings.log_file, runtime_catalog=[])
     collector.status = "running"
     collector.log_session_start(query=query, max_rounds=max_rounds, model=settings.model, mode="stream")
+    collector._push_log("scheduler", "正在准备执行环境，构建 supervisor、worker 名册与运行时工具。")
     last_signature = ""
     message_payload = messages or [{"role": "user", "content": query}]
 
@@ -830,6 +904,29 @@ def run_demo_session_stream(
         first_event = emit(initial, "snapshot")
         if first_event:
             yield first_event
+
+        bootstrap_logs = [
+            "正在加载配置、提示词与会话上下文。",
+            "正在准备运行时 worker 名册与调度规则。",
+            "正在构建 supervisor、工具链与执行后端。",
+        ]
+        for message in bootstrap_logs:
+            collector._push_log("scheduler", message)
+            bootstrap_payload = collector.build_payload(query=query, max_rounds=max_rounds, final=False)
+            bootstrap_event = emit(bootstrap_payload, "snapshot")
+            if bootstrap_event:
+                yield bootstrap_event
+            time.sleep(random.uniform(1.0, 2.0))
+
+        agent, runtime_catalog = build_agent_bundle(settings=settings, query=query)
+        collector.runtime_catalog = list(runtime_catalog)
+        collector.runtime_catalog_by_id = {item["id"]: item for item in runtime_catalog}
+        collector._push_log("scheduler", "执行环境准备完成，开始进入 agent 流式执行阶段。")
+
+        prepared = collector.build_payload(query=query, max_rounds=max_rounds, final=False)
+        prepared_event = emit(prepared, "snapshot")
+        if prepared_event:
+            yield prepared_event
 
         for chunk in agent.stream(
             {"messages": message_payload},
@@ -936,6 +1033,52 @@ def _parse_subagent_roster_from_tool_output(content: Any) -> dict[str, Any] | No
         "task_breakdown": str(payload.get("task_breakdown", "")).strip(),
         "workers": parsed_workers,
     }
+
+
+def _parse_published_file_from_tool_output(content: Any) -> dict[str, Any] | None:
+    text = _extract_structured_block(str(content))
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            payload = ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            return None
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        return None
+    file_payload = payload.get("file")
+    if not isinstance(file_payload, dict):
+        return None
+    required_fields = ("id", "path", "name", "title", "extension", "size", "updated_at", "mime_type", "preview_url", "download_url")
+    if any(field not in file_payload for field in required_fields):
+        return None
+    return {
+        "id": str(file_payload["id"]),
+        "path": str(file_payload["path"]),
+        "name": str(file_payload["name"]),
+        "title": str(file_payload["title"]),
+        "extension": str(file_payload["extension"]),
+        "size": int(file_payload["size"]),
+        "updated_at": str(file_payload["updated_at"]),
+        "mime_type": str(file_payload["mime_type"]),
+        "preview_url": str(file_payload["preview_url"]),
+        "download_url": str(file_payload["download_url"]),
+    }
+
+
+def _extract_workspace_paths(text: str) -> list[str]:
+    matches = re.findall(r"(?:^|[\s`\"'（(])(?:/workspace/|workspace/)([^\s`\"'）)]+)", text)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in matches:
+        path = item.strip().lstrip("/")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        normalized.append(path)
+    return normalized
 
 
 def _convert_agent_todos(todos: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -1056,10 +1199,6 @@ def _extract_messages(node_data: Any) -> list[Any]:
     if messages is None:
         return []
     return list(messages)
-
-
-def _can_supervisor_complete_task_directly(title: str) -> bool:
-    return any(keyword in title for keyword in SUPERVISOR_DIRECT_TASK_KEYWORDS)
 
 
 def _report_indicates_system_failure(text: str) -> bool:

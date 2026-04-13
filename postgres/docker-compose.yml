@@ -1,0 +1,21 @@
+# legacy 配置：
+# - 该文件仅保留为“单独启动 PostgreSQL”的历史参考配置
+# - 当前推荐统一使用仓库根目录下的 `docker-compose.yaml`
+# - 除非你只想单独调试 PostgreSQL，否则不要优先使用这个文件
+services:
+  postgresql:
+    image: pgvector/pgvector:pg17
+    container_name: postgresql
+    environment:
+      POSTGRES_USER: postgresql
+      POSTGRES_PASSWORD: postgresql
+      POSTGRES_DB: postgresql
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    restart: unless-stopped
+
+volumes:
+  pg_data:

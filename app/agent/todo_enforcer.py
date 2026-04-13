@@ -9,27 +9,7 @@ from langchain_core.tools import tool
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 
-
-EVIDENCE_TODO_SYSTEM_PROMPT = """## `write_evidence_todos`
-
-你必须使用 `write_evidence_todos` 来维护你自己的私有待办列表。
-这是每个子代理任务的强制要求。
-
-每个待办项都必须包含：
-- `content`：任务内容本身
-- `status`：`pending`、`in_progress`、`completed` 或 `blocked`
-- `evidence`：完成该任务的具体证据
-- `evidence_type`：`file_observation`、`tool_result`、`command_result`、`subagent_report`、`reasoned_check` 之一
-
-规则：
-1. 在结束前，你必须先创建并维护自己的证据型私有待办列表。
-2. 只有在能提供具体证据时，才允许把待办标记为 `completed`。
-3. 证据必须引用真实观察、工具输出、命令结果、文件内容或复核结论。
-4. 不要使用“已完成”“已检查”这类空泛证据。
-5. 如果某一项因为环境、权限、依赖、目标条件等原因无法完成，必须标记为 `blocked`，并写清阻塞证据。
-6. 如果证据本身说明“无法执行”“缺少工具”“无法获取数据”等，就不能把该项标记为 `completed`。
-7. 只有当所有证据型待办都变成 `completed` 或 `blocked`，且每项都有充分证据时，才允许输出最终答案。
-"""
+from app.prompts import get_evidence_todo_system_prompt
 
 BLOCKED_EVIDENCE_INDICATORS = (
     "缺少工具",
@@ -140,10 +120,10 @@ class EvidenceTodoMiddleware(AgentMiddleware[EvidencePlanningState, Any, Any]):
         if request.system_message is not None:
             content_blocks = [
                 *request.system_message.content_blocks,
-                {"type": "text", "text": f"\n\n{EVIDENCE_TODO_SYSTEM_PROMPT}"},
+                {"type": "text", "text": f"\n\n{get_evidence_todo_system_prompt()}"},
             ]
         else:
-            content_blocks = [{"type": "text", "text": EVIDENCE_TODO_SYSTEM_PROMPT}]
+            content_blocks = [{"type": "text", "text": get_evidence_todo_system_prompt()}]
         return handler(request.override(system_message=SystemMessage(content=content_blocks)))
 
     def after_agent(

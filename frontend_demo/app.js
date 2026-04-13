@@ -6,8 +6,13 @@ import DOMPurify from "dompurify";
 import mermaid from "mermaid";
 import {
   Activity,
+  FileCode2,
+  FileSpreadsheet,
+  FileText,
   ArrowUp,
   Bot,
+  BookText,
+  Clock3,
   CheckCircle2,
   ChevronDown,
   Circle,
@@ -16,11 +21,11 @@ import {
   LoaderCircle,
   MessageSquare,
   MonitorCog,
-  Plus,
   ShieldAlert,
   Sparkles,
   Square,
   TerminalSquare,
+  Trash2,
   X,
   XCircle,
 } from "lucide-react";
@@ -48,15 +53,25 @@ const EMPTY_STATE = {
   tasks: [],
   rounds: [],
   agents: [],
+  files: [],
   logs: [],
 };
 
-const EMPTY_AGENT_FORM = {
-  name: "",
-  display_name: "",
-  role: "",
-  description: "",
-  system_prompt: "",
+const DEFAULT_UI_STATE = {
+  theme: DEFAULT_THEME,
+  query: DEFAULT_QUERY,
+  showPromptModal: false,
+  showHistoryModal: false,
+  showArtifactModal: false,
+  activePromptId: "",
+  promptDraft: "",
+  selectedAgentId: "",
+  activeArtifactPath: "",
+};
+
+const EMPTY_DELETE_CONFIRM = {
+  open: false,
+  threadId: "",
 };
 
 function createThreadId() {
@@ -65,14 +80,138 @@ function createThreadId() {
   return `thread_${stamp}_${suffix}`;
 }
 
+function normalizeUiState(snapshot = {}) {
+  const nextTheme = typeof snapshot.theme === "string" ? snapshot.theme : DEFAULT_UI_STATE.theme;
+  const normalizedTheme = THEMES.some((item) => item.id === nextTheme) ? nextTheme : DEFAULT_UI_STATE.theme;
+  return {
+    theme: normalizedTheme,
+    query: typeof snapshot.query === "string" ? snapshot.query : DEFAULT_UI_STATE.query,
+    showPromptModal:
+      typeof snapshot.showPromptModal === "boolean"
+        ? snapshot.showPromptModal
+        : typeof snapshot.show_prompt_modal === "boolean"
+          ? snapshot.show_prompt_modal
+          : DEFAULT_UI_STATE.showPromptModal,
+    showHistoryModal:
+      typeof snapshot.showHistoryModal === "boolean"
+        ? snapshot.showHistoryModal
+        : typeof snapshot.show_history_modal === "boolean"
+          ? snapshot.show_history_modal
+          : DEFAULT_UI_STATE.showHistoryModal,
+    showArtifactModal:
+      typeof snapshot.showArtifactModal === "boolean"
+        ? snapshot.showArtifactModal
+        : typeof snapshot.show_artifact_modal === "boolean"
+          ? snapshot.show_artifact_modal
+          : DEFAULT_UI_STATE.showArtifactModal,
+    activePromptId:
+      typeof snapshot.activePromptId === "string"
+        ? snapshot.activePromptId
+        : typeof snapshot.active_prompt_id === "string"
+          ? snapshot.active_prompt_id
+          : DEFAULT_UI_STATE.activePromptId,
+    promptDraft:
+      typeof snapshot.promptDraft === "string"
+        ? snapshot.promptDraft
+        : typeof snapshot.prompt_draft === "string"
+          ? snapshot.prompt_draft
+          : DEFAULT_UI_STATE.promptDraft,
+    selectedAgentId:
+      typeof snapshot.selectedAgentId === "string"
+        ? snapshot.selectedAgentId
+        : typeof snapshot.selected_agent_id === "string"
+          ? snapshot.selected_agent_id
+          : DEFAULT_UI_STATE.selectedAgentId,
+    activeArtifactPath:
+      typeof snapshot.activeArtifactPath === "string"
+        ? snapshot.activeArtifactPath
+        : typeof snapshot.active_artifact_path === "string"
+          ? snapshot.active_artifact_path
+          : DEFAULT_UI_STATE.activeArtifactPath,
+  };
+}
+
+function buildUiStateSnapshot(uiState) {
+  const normalized = normalizeUiState(uiState);
+  return {
+    theme: normalized.theme,
+    query: normalized.query,
+    showPromptModal: false,
+    showHistoryModal: false,
+    showArtifactModal: false,
+    activePromptId: normalized.activePromptId,
+    promptDraft: normalized.promptDraft,
+    selectedAgentId: normalized.selectedAgentId,
+    activeArtifactPath: normalized.activeArtifactPath,
+  };
+}
+
 function cloneBaseState() {
   return {
     ...EMPTY_STATE,
     tasks: [],
     rounds: [],
     agents: [],
+    files: [],
     logs: [],
   };
+}
+
+function formatUtc8Timestamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function formatFileSize(value) {
+  const size = Number(value);
+  if (!Number.isFinite(size) || size < 0) return "-";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function classifyArtifact(file) {
+  const mimeType = (file?.mime_type || "").toLowerCase();
+  const extension = (file?.extension || "").toLowerCase();
+  const path = (file?.path || file?.name || "").toLowerCase();
+  if ([".xlsx", ".xls"].includes(extension)) return "spreadsheet";
+  if (extension === ".csv") return "text";
+  if (mimeType.startsWith("image/")) return "image";
+  if (mimeType === "application/pdf" || path.endsWith(".pdf")) return "pdf";
+  if (
+    mimeType.startsWith("text/") ||
+    mimeType.includes("json") ||
+    mimeType.includes("xml") ||
+    mimeType.includes("yaml") ||
+    mimeType.includes("javascript") ||
+    mimeType.includes("markdown") ||
+    mimeType.includes("csv") ||
+    /\.(md|txt|log|py|js|ts|tsx|jsx|json|ya?ml|toml|ini|cfg|conf|csv|sql|sh)$/i.test(path)
+  ) {
+    return path.endsWith(".md") || mimeType.includes("markdown") ? "markdown" : "text";
+  }
+  return "binary";
+}
+
+function iconForArtifact(file) {
+  const extension = (file?.extension || "").toLowerCase();
+  if ([".xlsx", ".xls", ".csv"].includes(extension)) return FileSpreadsheet;
+  if ([".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".yaml", ".yml", ".toml", ".sql", ".sh"].includes(extension)) {
+    return FileCode2;
+  }
+  return FileText;
 }
 
 function normalizeAgent(agent, existing = {}) {
@@ -223,7 +362,8 @@ function RoundList({ rounds }) {
   return html`<div className="stack-block">
     ${orderedRounds.map((round, index) => {
       const roundStatus = round.status || (round.conclusion ? "done" : "running");
-      return html`<details key=${round.index || index} className=${`disclosure-card ${statusClass(roundStatus)}`}>
+      const shouldOpen = stepState(roundStatus) !== "success";
+      return html`<details key=${round.index || index} className=${`disclosure-card ${statusClass(roundStatus)}`} open=${shouldOpen}>
         <summary>
           <div>
             <div className="summary-title">Round ${round.index}</div>
@@ -251,7 +391,7 @@ function RoundList({ rounds }) {
 
 function WorkerList({ agents, onOpen }) {
   if (!agents.length) {
-    return html`<div className="empty-block">当前没有活跃 worker。需要时可用顶部按钮新增子 Agent。</div>`;
+    return html`<div className="empty-block">当前没有活跃 worker。</div>`;
   }
 
   return html`<div className="stack-block">
@@ -263,6 +403,7 @@ function WorkerList({ agents, onOpen }) {
         stepState(agent.status) === "error" ||
         Boolean(agent.report) ||
         Boolean(agent.last_guard_message);
+      const defaultOpen = stepState(agent.status) === "success" ? false : shouldOpen;
       const todoCountText =
         agent.todo_list?.length
           ? String(agent.todo_list.length)
@@ -282,7 +423,7 @@ function WorkerList({ agents, onOpen }) {
             : "正常";
       const reportClass =
         stepState(agent.status) === "error" || stepState(agent.status) === "blocked" ? "alert-block" : "note-block";
-      return html`<details key=${agent.id || agent.name} className=${`disclosure-card ${statusClass(agent.status)}`} open=${shouldOpen}>
+      return html`<details key=${agent.id || agent.name} className=${`disclosure-card ${statusClass(agent.status)}`} open=${defaultOpen}>
         <summary>
           <div className="worker-summary">
             <button
@@ -328,6 +469,35 @@ function WorkerList({ agents, onOpen }) {
   </div>`;
 }
 
+function PublishedFileList({ files, onOpen }) {
+  if (!files.length) {
+    return html`<div className="empty-block">当前没有已发布的文件产物。</div>`;
+  }
+
+  return html`<div className="artifact-grid">
+    ${files.map(
+      (file) => html`<article key=${file.id || file.path} className="artifact-card">
+        <button type="button" className="artifact-card-main" onClick=${() => onOpen(file)}>
+          <div className="artifact-icon-wrap">
+            <${iconForArtifact(file)} className="h-4 w-4" />
+          </div>
+          <div className="artifact-card-head">
+            <div className="artifact-title">${file.title || file.name}</div>
+            <span className="tag artifact-ext-tag">${file.extension || "(无后缀)"}</span>
+          </div>
+          <div className="artifact-meta">${formatFileSize(file.size)} · ${formatUtc8Timestamp(file.updated_at)}</div>
+        </button>
+        <div className="artifact-actions">
+          <span className="artifact-open-hint">点击预览</span>
+          <a href=${file.download_url} className="secondary-button compact artifact-download" download>
+            下载
+          </a>
+        </div>
+      </article>`
+    )}
+  </div>`;
+}
+
 function LogList({ logs }) {
   if (!logs.length) {
     return html`<div className="empty-block">执行日志会在这里以对话内附属记录方式展示。</div>`;
@@ -343,16 +513,18 @@ function LogList({ logs }) {
   </div>`;
 }
 
-function ChatBubble({ kind = "assistant", title, eyebrow, icon: Icon, children, accent = "" }) {
+function ChatBubble({ kind = "assistant", title, eyebrow, icon: Icon, children, accent = "", hideHeader = false }) {
   return html`<article className=${`chat-row ${kind === "user" ? "is-user" : ""}`}>
     <div className=${`chat-bubble ${kind === "user" ? "is-user" : ""} ${accent}`}>
-      <div className="chat-bubble-head">
-        <div className="chat-bubble-title">
-          ${Icon ? html`<${Icon} className="h-4 w-4" />` : null}
-          <span>${title}</span>
-        </div>
-        ${eyebrow ? html`<span className="chat-bubble-eyebrow">${eyebrow}</span>` : null}
-      </div>
+      ${hideHeader
+        ? null
+        : html`<div className="chat-bubble-head">
+            <div className="chat-bubble-title">
+              ${Icon ? html`<${Icon} className="h-4 w-4" />` : null}
+              <span>${title}</span>
+            </div>
+            ${eyebrow ? html`<span className="chat-bubble-eyebrow">${eyebrow}</span>` : null}
+          </div>`}
       <div className="chat-bubble-body">${children}</div>
     </div>
   </article>`;
@@ -420,7 +592,54 @@ function FinalSummaryContent({ content }) {
   ></div>`;
 }
 
-function SessionTranscript({ session, error, onOpenAgent }) {
+function FilePreviewContent({ file, previewState }) {
+  const kind = classifyArtifact(file);
+  if (!file) {
+    return html`<div className="empty-block">未选择文件。</div>`;
+  }
+  if (kind === "image") {
+    return html`<div className="file-preview-shell"><img className="file-preview-image" src=${file.preview_url} alt=${file.title || file.name} /></div>`;
+  }
+  if (kind === "pdf") {
+    return html`<iframe className="file-preview-frame" src=${file.preview_url} title=${file.title || file.name}></iframe>`;
+  }
+  if (previewState.loading) {
+    return html`<div className="empty-block">
+      <span className="loading-inline">
+        <${LoaderCircle} className="h-4 w-4 animate-spin" />
+        <span>正在加载文件预览...</span>
+      </span>
+    </div>`;
+  }
+  if (previewState.error) {
+    return html`<div className="alert-block">${previewState.error}</div>`;
+  }
+  if (kind === "markdown") {
+    return html`<div className="md-content file-preview-markdown" dangerouslySetInnerHTML=${{ __html: previewState.html || "" }}></div>`;
+  }
+  if (kind === "text") {
+    return html`<pre className="prompt-code-block file-preview-code"><code>${previewState.text || ""}</code></pre>`;
+  }
+  return html`<div className="stack-block">
+    <div className="note-block">当前文件类型暂不支持内嵌预览，请直接下载查看。</div>
+    <div className="detail-grid">
+      <div className="info-card wide">
+        <div className="info-label">File</div>
+        <div className="info-value">${file.name}</div>
+      </div>
+      <div className="info-card">
+        <div className="info-label">Type</div>
+        <div className="info-value">${file.extension || file.mime_type}</div>
+      </div>
+      <div className="info-card">
+        <div className="info-label">Size</div>
+        <div className="info-value">${formatFileSize(file.size)}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function SessionTranscript({ session, error, onOpenAgent, onOpenFile }) {
   const state = session.state;
   const completedCount = state.tasks.filter((task) => stepState(task.status) === "success").length;
   const isErrorSession = Boolean(error) || state.status === "stopped";
@@ -436,6 +655,7 @@ function SessionTranscript({ session, error, onOpenAgent }) {
   const showAssistantBubble = Boolean(state.final_summary || errorText) || state.status === "running";
   const showTaskBubble = state.tasks.length > 0;
   const showWorkerBubble = hasWorkerActivity;
+  const showFileBubble = (state.files || []).length > 0;
   const showRoundBubble = state.rounds.length > 0;
   const showLogBubble = state.logs.length > 0;
 
@@ -478,9 +698,9 @@ function SessionTranscript({ session, error, onOpenAgent }) {
     ${
       showLogBubble
         ? html`<${ChatBubble} title="Execution Log" eyebrow="Trace" icon=${ShieldAlert}>
-            <details className="disclosure-card log-disclosure" open>
+            <details className="disclosure-card log-disclosure">
               <summary>
-                <${SectionTitle} icon=${ShieldAlert} title="事件流" meta=${`${state.logs.length} log(s)`} />
+                <${SectionTitle} icon=${ShieldAlert} title="事件流" meta=${`${state.logs.length} log(s) · 最近 60 条`} />
                 <${ChevronDown} className="h-4 w-4 disclosure-icon" />
               </summary>
               <div className="disclosure-body">
@@ -513,18 +733,27 @@ function SessionTranscript({ session, error, onOpenAgent }) {
           </${ChatBubble}>`
         : null
     }
+
+    ${
+      showFileBubble
+        ? html`<${ChatBubble} title="Workspace Files" eyebrow="Artifacts" icon=${BookText}>
+            <${SectionTitle} icon=${BookText} title="文件产物" meta=${`${(state.files || []).length} file(s)`} />
+            <${PublishedFileList} files=${state.files || []} onOpen=${onOpenFile} />
+          </${ChatBubble}>`
+        : null
+    }
   </div>`;
 }
 
-function Modal({ open, title, children, onClose }) {
+function Modal({ open, title, eyebrow = "Agent Panel", children, onClose, variant = "" }) {
   if (!open) return null;
 
   return html`<div className="modal-root">
     <button type="button" className="modal-backdrop" aria-label="关闭" onClick=${onClose}></button>
-    <div className="modal-card">
+    <div className=${`modal-card ${variant ? `is-${variant}` : ""}`}>
       <div className="modal-head">
         <div>
-          <div className="modal-eyebrow">Agent Panel</div>
+          <div className="modal-eyebrow">${eyebrow}</div>
           <h3 className="modal-title">${title}</h3>
         </div>
         <button type="button" onClick=${onClose} className="icon-button">
@@ -533,6 +762,144 @@ function Modal({ open, title, children, onClose }) {
       </div>
       ${children}
     </div>
+  </div>`;
+}
+
+function PromptCenter({
+  prompts,
+  activePromptId,
+  onSelect,
+  loading,
+  error,
+  draftContent,
+  onDraftChange,
+  onSave,
+  onReset,
+  saveFeedback,
+  saveFeedbackTone,
+  saving,
+  resetting,
+}) {
+  const activePrompt = prompts.find((item) => item.id === activePromptId) || prompts[0] || null;
+
+  return html`<div className="prompt-browser">
+    <div className="prompt-nav">
+      ${
+        prompts.length
+          ? prompts.map(
+              (prompt) => html`<button
+                key=${prompt.id}
+                type="button"
+                className=${`prompt-nav-item ${prompt.id === (activePrompt?.id || "") ? "is-active" : ""}`}
+                onClick=${() => onSelect(prompt.id)}
+              >
+                <div className="prompt-nav-title">${prompt.title}</div>
+                <div className="prompt-nav-subtitle">${prompt.subtitle}</div>
+              </button>`
+            )
+          : html`<div className="empty-block">当前没有可展示的提示词。</div>`
+      }
+    </div>
+    <div className="prompt-content">
+      ${
+        loading
+          ? html`<div className="empty-block">
+              <span className="loading-inline">
+                <${LoaderCircle} className="h-4 w-4 animate-spin" />
+                <span>正在加载提示词...</span>
+              </span>
+            </div>`
+          : error
+            ? html`<div className="alert-block">${error}</div>`
+            : activePrompt
+              ? html`<div className="stack-block prompt-stack">
+                  <div className="prompt-meta-card">
+                    <div>
+                      <div className="summary-title">${activePrompt.title}</div>
+                      <div className="summary-subtitle">${activePrompt.subtitle}</div>
+                    </div>
+                    <span className="tag">${activePrompt.source}</span>
+                  </div>
+                  <div className="prompt-toolbar">
+                    <span className="prompt-toolbar-note">修改后点击保存，后端会立即更新并影响后续运行。</span>
+                    <div className="prompt-toolbar-actions">
+                      <button type="button" className="secondary-button" onClick=${onReset} disabled=${saving || resetting}>
+                        ${resetting ? html`<${LoaderCircle} className="h-4 w-4 animate-spin" />` : null}
+                        <span>${resetting ? "恢复中" : "恢复默认"}</span>
+                      </button>
+                      <button type="button" className="primary-button" onClick=${onSave} disabled=${saving || resetting}>
+                        ${saving ? html`<${LoaderCircle} className="h-4 w-4 animate-spin" />` : null}
+                        <span>${saving ? "保存中" : "保存提示词"}</span>
+                      </button>
+                    </div>
+                  </div>
+                  ${saveFeedback ? html`<div className=${saveFeedbackTone === "success" ? "success-block" : saveFeedbackTone === "error" ? "alert-block" : "note-block"}>${saveFeedback}</div>` : null}
+                  <textarea
+                    className="field-control field-area prompt-editor"
+                    value=${draftContent}
+                    onChange=${(event) => onDraftChange(event.target.value)}
+                    spellCheck="false"
+                  ></textarea>
+                </div>`
+              : html`<div className="empty-block">请选择左侧的提示词模块。</div>`
+      }
+    </div>
+  </div>`;
+}
+
+function HistoryCenter({ threads, activeThreadId, onSelectThread, onDeleteThread, deletingThreadId, loading, error }) {
+  if (loading) {
+    return html`<div className="empty-block">
+      <span className="loading-inline">
+        <${LoaderCircle} className="h-4 w-4 animate-spin" />
+        <span>正在加载历史会话...</span>
+      </span>
+    </div>`;
+  }
+
+  if (error) {
+    return html`<div className="alert-block">${error}</div>`;
+  }
+
+  if (!threads.length) {
+    return html`<div className="empty-block">当前还没有已持久化的历史线程。</div>`;
+  }
+
+  return html`<div className="history-thread-list">
+    ${threads.map(
+      (thread) => html`<div
+        key=${thread.thread_id}
+        className=${`history-thread-card ${thread.thread_id === activeThreadId ? "is-active" : ""}`}
+      >
+        <button
+          type="button"
+          className="history-thread-main"
+          onClick=${() => onSelectThread(thread.thread_id)}
+        >
+          <div className="history-thread-head">
+            <div className="history-thread-title">${thread.thread_id}</div>
+            <span className="tag">${thread.session_count} 条</span>
+          </div>
+          <div className="history-thread-query">${thread.latest_query || "无最近问题摘要"}</div>
+          <div className="history-thread-meta">${formatUtc8Timestamp(thread.updated_at)}</div>
+        </button>
+        <button
+          type="button"
+          className="icon-button history-thread-delete"
+          aria-label="删除历史线程"
+          title="删除历史线程"
+          disabled=${deletingThreadId === thread.thread_id}
+          onClick=${(event) => {
+            event.stopPropagation();
+            onDeleteThread(thread.thread_id);
+          }}
+        >
+          ${deletingThreadId === thread.thread_id
+            ? html`<${LoaderCircle} className="h-4 w-4 animate-spin" />`
+            : html`<${Trash2} className="h-4 w-4" />`}
+        </button>
+      </div>`
+    )}
   </div>`;
 }
 
@@ -553,37 +920,135 @@ function ThemeSwitcher({ theme, setTheme }) {
   </div>`;
 }
 
+async function parseApiResponse(response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    return response.json();
+  }
+
+  const rawText = await response.text();
+  const normalized = rawText.trim();
+  if (normalized.startsWith("<!DOCTYPE") || normalized.startsWith("<html")) {
+    throw new Error("后端返回了 HTML 页面，当前服务可能还是旧版本，请重启 serve_demo.py");
+  }
+  throw new Error(normalized || "后端返回了非 JSON 响应");
+}
+
 function App() {
   const [demoState, setDemoState] = useState(() => cloneBaseState());
   const [history, setHistory] = useState([]);
-  const [query, setQuery] = useState(DEFAULT_QUERY);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [selectedAgent, setSelectedAgent] = useState(null);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [agentForm, setAgentForm] = useState(EMPTY_AGENT_FORM);
-  const [formFeedback, setFormFeedback] = useState("");
   const [threadId, setThreadId] = useState(() => createThreadId());
   const [modelName, setModelName] = useState("");
-  const [theme, setTheme] = useState(() => {
+  const [promptSections, setPromptSections] = useState([]);
+  const [promptLoading, setPromptLoading] = useState(false);
+  const [promptError, setPromptError] = useState("");
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [promptResetting, setPromptResetting] = useState(false);
+  const [promptSaveFeedback, setPromptSaveFeedback] = useState("");
+  const [promptSaveFeedbackTone, setPromptSaveFeedbackTone] = useState("");
+  const [historyThreads, setHistoryThreads] = useState([]);
+  const [historyThreadsLoading, setHistoryThreadsLoading] = useState(false);
+  const [historyThreadsError, setHistoryThreadsError] = useState("");
+  const [deletingThreadId, setDeletingThreadId] = useState("");
+  const [deleteConfirm, setDeleteConfirm] = useState(EMPTY_DELETE_CONFIRM);
+  const [artifactPreview, setArtifactPreview] = useState({ loading: false, error: "", text: "", html: "" });
+  const [artifactDraft, setArtifactDraft] = useState("");
+  const [artifactSaving, setArtifactSaving] = useState(false);
+  const [artifactSaveFeedback, setArtifactSaveFeedback] = useState("");
+  const [uiState, setUiState] = useState(() => {
     const savedTheme = window.localStorage.getItem("demo-theme");
-    return THEMES.some((item) => item.id === savedTheme) ? savedTheme : DEFAULT_THEME;
+    return normalizeUiState({
+      ...DEFAULT_UI_STATE,
+      theme: THEMES.some((item) => item.id === savedTheme) ? savedTheme : DEFAULT_THEME,
+    });
   });
   const runControllerRef = useRef(null);
+  const uiStateSaveTimerRef = useRef(null);
+  const selectedAgent = useMemo(
+    () => demoState.agents.find((agent) => agent.id === uiState.selectedAgentId) || null,
+    [demoState.agents, uiState.selectedAgentId]
+  );
+  const publishedFiles = useMemo(() => {
+    const items = new Map();
+    for (const session of history) {
+      for (const file of session.state?.files || []) {
+        if (file?.path) items.set(file.path, file);
+      }
+    }
+    return Array.from(items.values());
+  }, [history]);
+  const activeArtifact = useMemo(
+    () => publishedFiles.find((file) => file.path === uiState.activeArtifactPath) || null,
+    [publishedFiles, uiState.activeArtifactPath]
+  );
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    window.localStorage.setItem("demo-theme", theme);
-  }, [theme]);
+    document.documentElement.dataset.theme = uiState.theme;
+    window.localStorage.setItem("demo-theme", uiState.theme);
+  }, [uiState.theme]);
+
+  useEffect(() => {
+    if (!uiState.showArtifactModal || !activeArtifact) {
+      setArtifactPreview({ loading: false, error: "", text: "", html: "" });
+      setArtifactDraft("");
+      setArtifactSaveFeedback("");
+      return undefined;
+    }
+    const kind = classifyArtifact(activeArtifact);
+    if (!["markdown", "text"].includes(kind)) {
+      setArtifactPreview({ loading: false, error: "", text: "", html: "" });
+      setArtifactDraft("");
+      setArtifactSaveFeedback("");
+      return undefined;
+    }
+
+    let cancelled = false;
+    setArtifactPreview({ loading: true, error: "", text: "", html: "" });
+    setArtifactDraft("");
+    setArtifactSaveFeedback("");
+    fetch(activeArtifact.preview_url)
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`预览加载失败: HTTP ${response.status}`);
+        }
+        return response.text();
+      })
+      .then((text) => {
+        if (cancelled) return;
+        if (kind === "markdown") {
+          const rawHtml = marked.parse(text, { gfm: true, breaks: true });
+          setArtifactPreview({
+            loading: false,
+            error: "",
+            text,
+            html: DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true } }),
+          });
+          setArtifactDraft(text);
+          return;
+        }
+        setArtifactPreview({ loading: false, error: "", text, html: "" });
+        setArtifactDraft(text);
+      })
+      .catch((loadError) => {
+        if (cancelled) return;
+        setArtifactPreview({ loading: false, error: loadError.message, text: "", html: "" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [uiState.showArtifactModal, activeArtifact]);
 
   useEffect(() => {
     void loadMeta();
+    void loadHistory();
   }, []);
 
   async function loadMeta() {
     try {
       const response = await fetch("/api/demo/meta");
-      const payload = await response.json();
+      const payload = await parseApiResponse(response);
       if (!response.ok) return;
       setModelName(payload.model || "");
       setDemoState((current) => ({
@@ -598,8 +1063,296 @@ function App() {
     }
   }
 
+  async function loadHistory() {
+    try {
+      const response = await fetch("/api/demo/history");
+      const payload = await parseApiResponse(response);
+      if (!response.ok) return;
+      const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+      const normalizedSessions = sessions.map((session) => ({
+        id: session.id,
+        query: session.query || "",
+        state: session.state || cloneBaseState(),
+        error: session.error || "",
+      }));
+      if (payload.thread_id) {
+        setThreadId(payload.thread_id);
+      }
+      setUiState((current) =>
+        normalizeUiState({
+          ...current,
+          ...(payload.ui_state || {}),
+          showPromptModal: false,
+          showHistoryModal: false,
+          showArtifactModal: false,
+        })
+      );
+      if (normalizedSessions.length) {
+        setHistory(normalizedSessions);
+        const lastSession = normalizedSessions[normalizedSessions.length - 1];
+        setDemoState(lastSession.state || cloneBaseState());
+        setError(lastSession.error || "");
+      }
+    } catch {
+      return;
+    }
+  }
+
+  async function loadHistoryThreads() {
+    setHistoryThreadsLoading(true);
+    setHistoryThreadsError("");
+    try {
+      const response = await fetch("/api/demo/history/threads");
+      const payload = await parseApiResponse(response);
+      if (!response.ok) throw new Error(payload.error || "history_threads_failed");
+      setHistoryThreads(Array.isArray(payload.threads) ? payload.threads : []);
+    } catch (loadError) {
+      setHistoryThreadsError(`加载历史线程失败: ${loadError.message}`);
+    } finally {
+      setHistoryThreadsLoading(false);
+    }
+  }
+
+  async function loadPrompts() {
+    setPromptLoading(true);
+    setPromptError("");
+    try {
+      const response = await fetch("/api/demo/prompts");
+      const payload = await parseApiResponse(response);
+      if (!response.ok) throw new Error(payload.error || "prompt_load_failed");
+      const prompts = Array.isArray(payload.prompts) ? payload.prompts : [];
+      setPromptSections(prompts);
+      setUiState((current) => {
+        const nextId = current.activePromptId || prompts[0]?.id || "";
+        const matched = prompts.find((item) => item.id === nextId) || prompts[0];
+        return normalizeUiState({
+          ...current,
+          activePromptId: nextId,
+          promptDraft: matched?.content || "",
+        });
+      });
+    } catch (loadError) {
+      setPromptError(`加载提示词失败: ${loadError.message}`);
+    } finally {
+      setPromptLoading(false);
+    }
+  }
+
+  function openPromptCenter() {
+    setUiState((current) => normalizeUiState({ ...current, showPromptModal: true }));
+    setPromptSaveFeedback("");
+    setPromptSaveFeedbackTone("");
+    if (!promptSections.length && !promptLoading) {
+      void loadPrompts();
+    }
+  }
+
+  function openHistoryCenter() {
+    setUiState((current) => normalizeUiState({ ...current, showHistoryModal: true }));
+    if (!historyThreads.length && !historyThreadsLoading) {
+      void loadHistoryThreads();
+    }
+  }
+
+  useEffect(() => {
+    if (promptSaveFeedbackTone !== "success" || !promptSaveFeedback) return undefined;
+    const timer = window.setTimeout(() => {
+      setPromptSaveFeedback("");
+      setPromptSaveFeedbackTone("");
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [promptSaveFeedback, promptSaveFeedbackTone]);
+
+  useEffect(() => {
+    if (!promptSections.length) return;
+    const activePrompt = promptSections.find((item) => item.id === uiState.activePromptId) || promptSections[0] || null;
+    if (!activePrompt) return;
+    setUiState((current) => {
+      const nextId = activePrompt.id;
+      const draftShouldUpdate =
+        current.activePromptId !== nextId || !current.promptDraft || current.promptDraft === "";
+      if (current.activePromptId === nextId && !draftShouldUpdate) {
+        return current;
+      }
+      return normalizeUiState({
+        ...current,
+        activePromptId: nextId,
+        promptDraft: draftShouldUpdate ? activePrompt.content || "" : current.promptDraft,
+      });
+    });
+  }, [promptSections, uiState.activePromptId]);
+
+  useEffect(() => {
+    if (!threadId) return undefined;
+    const snapshot = buildUiStateSnapshot(uiState);
+    if (uiStateSaveTimerRef.current) {
+      window.clearTimeout(uiStateSaveTimerRef.current);
+    }
+    uiStateSaveTimerRef.current = window.setTimeout(() => {
+      void fetch("/api/demo/thread-state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          thread_id: threadId,
+          ui_state: snapshot,
+        }),
+      }).catch(() => {});
+    }, 250);
+    return () => {
+      if (uiStateSaveTimerRef.current) {
+        window.clearTimeout(uiStateSaveTimerRef.current);
+      }
+    };
+  }, [threadId, uiState]);
+
+  async function handleSavePrompt() {
+    const activePrompt = promptSections.find((item) => item.id === uiState.activePromptId);
+    if (!activePrompt || promptSaving || promptResetting) return;
+
+    setPromptSaving(true);
+    setPromptSaveFeedback("");
+    setPromptSaveFeedbackTone("");
+    try {
+      const response = await fetch("/api/demo/prompts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: activePrompt.id,
+          content: uiState.promptDraft,
+        }),
+      });
+      const payload = await parseApiResponse(response);
+      if (!response.ok) throw new Error(payload.error || "prompt_update_failed");
+      const prompts = Array.isArray(payload.prompts) ? payload.prompts : [];
+      setPromptSections(prompts);
+      const matched = prompts.find((item) => item.id === activePrompt.id) || payload.prompt;
+      setUiState((current) => normalizeUiState({ ...current, promptDraft: matched?.content || current.promptDraft }));
+      setPromptSaveFeedback("保存成功，后续运行会使用新的提示词。");
+      setPromptSaveFeedbackTone("success");
+    } catch (saveError) {
+      setPromptSaveFeedback(`保存失败: ${saveError.message}`);
+      setPromptSaveFeedbackTone("error");
+    } finally {
+      setPromptSaving(false);
+    }
+  }
+
+  async function handleResetPrompt() {
+    const activePrompt = promptSections.find((item) => item.id === uiState.activePromptId);
+    if (!activePrompt || promptSaving || promptResetting) return;
+
+    setPromptResetting(true);
+    setPromptSaveFeedback("");
+    setPromptSaveFeedbackTone("");
+    try {
+      const response = await fetch("/api/demo/prompts/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: activePrompt.id }),
+      });
+      const payload = await parseApiResponse(response);
+      if (!response.ok) throw new Error(payload.error || "prompt_reset_failed");
+      const prompts = Array.isArray(payload.prompts) ? payload.prompts : [];
+      setPromptSections(prompts);
+      const matched = prompts.find((item) => item.id === activePrompt.id) || payload.prompt;
+      setUiState((current) => normalizeUiState({ ...current, promptDraft: matched?.content || "" }));
+      setPromptSaveFeedback("已恢复默认提示词。");
+      setPromptSaveFeedbackTone("success");
+    } catch (resetError) {
+      setPromptSaveFeedback(`恢复失败: ${resetError.message}`);
+      setPromptSaveFeedbackTone("error");
+    } finally {
+      setPromptResetting(false);
+    }
+  }
+
+  async function handleSelectThread(nextThreadId) {
+    if (!nextThreadId || nextThreadId === threadId) {
+      setUiState((current) => normalizeUiState({ ...current, showHistoryModal: false }));
+      return;
+    }
+    try {
+      const response = await fetch(`/api/demo/history?thread_id=${encodeURIComponent(nextThreadId)}`);
+      const payload = await parseApiResponse(response);
+      if (!response.ok) throw new Error(payload.error || "history_load_failed");
+      const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+      const normalizedSessions = sessions.map((session) => ({
+        id: session.id,
+        query: session.query || "",
+        state: session.state || cloneBaseState(),
+        error: session.error || "",
+      }));
+      setThreadId(payload.thread_id || nextThreadId);
+      setUiState((current) =>
+        normalizeUiState({
+          ...current,
+          ...(payload.ui_state || {}),
+          showHistoryModal: false,
+        })
+      );
+      setHistory(normalizedSessions);
+      if (normalizedSessions.length) {
+        const lastSession = normalizedSessions[normalizedSessions.length - 1];
+        setDemoState(lastSession.state || cloneBaseState());
+        setError(lastSession.error || "");
+      } else {
+        setDemoState(cloneBaseState());
+        setError("");
+      }
+    } catch (loadError) {
+      setHistoryThreadsError(`切换历史线程失败: ${loadError.message}`);
+    }
+  }
+
+  async function handleDeleteThread(targetThreadId) {
+    if (!targetThreadId || deletingThreadId) return;
+    setDeletingThreadId(targetThreadId);
+    setHistoryThreadsError("");
+    try {
+      const response = await fetch(`/api/demo/history?thread_id=${encodeURIComponent(targetThreadId)}`, {
+        method: "DELETE",
+      });
+      const payload = await parseApiResponse(response);
+      if (!response.ok) throw new Error(payload.error || "history_delete_failed");
+
+      const remainingThreads = historyThreads.filter((thread) => thread.thread_id !== targetThreadId);
+      setHistoryThreads(remainingThreads);
+
+      if (threadId !== targetThreadId) {
+        return;
+      }
+
+      if (payload.latest_thread_id) {
+        await handleSelectThread(payload.latest_thread_id);
+        return;
+      }
+
+      setThreadId(createThreadId());
+      setHistory([]);
+      setError("");
+      setDemoState((current) => ({
+        ...cloneBaseState(),
+        agents: current.agents,
+      }));
+      setUiState((current) =>
+        normalizeUiState({
+          ...DEFAULT_UI_STATE,
+          theme: current.theme,
+          activePromptId: current.activePromptId,
+          promptDraft: current.promptDraft,
+          showHistoryModal: false,
+        })
+      );
+    } catch (deleteError) {
+      setHistoryThreadsError(`删除历史线程失败: ${deleteError.message}`);
+    } finally {
+      setDeletingThreadId("");
+      setDeleteConfirm(EMPTY_DELETE_CONFIRM);
+    }
+  }
+
   async function handleRun() {
-    const trimmed = query.trim();
+    const trimmed = uiState.query.trim();
     if (!trimmed || loading) return;
 
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -631,7 +1384,7 @@ function App() {
         error: "",
       },
     ]);
-    setQuery(DEFAULT_QUERY);
+    setUiState((current) => normalizeUiState({ ...current, query: DEFAULT_QUERY }));
 
     try {
       const response = await fetch("/api/demo/run", {
@@ -640,6 +1393,8 @@ function App() {
         signal: controller.signal,
         body: JSON.stringify({
           query: trimmed,
+          thread_id: threadId,
+          session_id: sessionId,
           max_rounds: MAX_ROUNDS,
           messages: [...messageHistory, { role: "user", content: trimmed }],
         }),
@@ -752,16 +1507,22 @@ function App() {
   }
 
   function handleNewThread() {
-    if (loading) return;
+    if (loading) {
+      runControllerRef.current?.abort();
+      runControllerRef.current = null;
+    }
     setLoading(false);
     setError("");
-    setQuery(DEFAULT_QUERY);
     setHistory([]);
-    setSelectedAgent(null);
-    setShowAddModal(false);
-    setAgentForm(EMPTY_AGENT_FORM);
-    setFormFeedback("");
     setThreadId(createThreadId());
+    setUiState((current) =>
+      normalizeUiState({
+        ...DEFAULT_UI_STATE,
+        theme: current.theme,
+        activePromptId: current.activePromptId,
+        promptDraft: current.promptDraft,
+      })
+    );
     setDemoState((current) => ({
       ...cloneBaseState(),
       agents: current.agents,
@@ -769,32 +1530,62 @@ function App() {
     void loadMeta();
   }
 
-  async function handleCreateAgent(event) {
-    event.preventDefault();
-    setFormFeedback("正在创建子 Agent...");
+  function handleOpenArtifact(file) {
+    setUiState((current) =>
+      normalizeUiState({
+        ...current,
+        activeArtifactPath: file?.path || "",
+        showArtifactModal: Boolean(file?.path),
+      })
+    );
+  }
+
+  async function handleSaveArtifact() {
+    if (!activeArtifact || artifactSaving) return;
+    setArtifactSaving(true);
+    setArtifactSaveFeedback("");
     try {
-      const response = await fetch("/api/demo/subagents", {
+      const response = await fetch("/api/demo/workspace-file", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(agentForm),
+        body: JSON.stringify({
+          path: activeArtifact.path,
+          content: artifactDraft,
+        }),
       });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "create_failed");
+      const payload = await parseApiResponse(response);
+      if (!response.ok) throw new Error(payload.error || "workspace_file_save_failed");
+      const nextFile = payload.file || activeArtifact;
       setDemoState((current) => ({
         ...current,
-        agents: (payload.agents || []).map((agent) => {
-          const existing = current.agents.find((item) => item.id === agent.id);
-          return normalizeAgent(agent, existing);
-        }),
+        files: (current.files || []).map((item) => (item.path === nextFile.path ? { ...item, ...nextFile } : item)),
       }));
-      setFormFeedback(`已创建子 Agent: ${payload.agent.name}`);
-      setAgentForm(EMPTY_AGENT_FORM);
-      window.setTimeout(() => {
-        setShowAddModal(false);
-        setFormFeedback("");
-      }, 500);
-    } catch (createError) {
-      setFormFeedback(`创建失败: ${createError.message}`);
+      setHistory((current) =>
+        current.map((session) => ({
+          ...session,
+          state: {
+            ...session.state,
+            files: (session.state.files || []).map((item) => (item.path === nextFile.path ? { ...item, ...nextFile } : item)),
+          },
+        }))
+      );
+      const kind = classifyArtifact(nextFile);
+      if (kind === "markdown") {
+        const rawHtml = marked.parse(artifactDraft, { gfm: true, breaks: true });
+        setArtifactPreview({
+          loading: false,
+          error: "",
+          text: artifactDraft,
+          html: DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true } }),
+        });
+      } else if (kind === "text") {
+        setArtifactPreview({ loading: false, error: "", text: artifactDraft, html: "" });
+      }
+      setArtifactSaveFeedback("文件已保存。");
+    } catch (saveError) {
+      setArtifactSaveFeedback(`保存失败: ${saveError.message}`);
+    } finally {
+      setArtifactSaving(false);
     }
   }
 
@@ -810,6 +1601,30 @@ function App() {
   }, [demoState.status, error]);
 
   return html`<div className="app-shell">
+    <aside className="side-rail">
+      <div className="side-rail-card">
+        <button
+          type="button"
+          className=${`side-menu-button ${uiState.showHistoryModal ? "is-active" : ""}`}
+          onClick=${openHistoryCenter}
+          title="查看历史会话"
+          disabled=${loading}
+        >
+          <${Clock3} className="h-4 w-4" />
+          <span>历史</span>
+        </button>
+        <button
+          type="button"
+          className=${`side-menu-button ${uiState.showPromptModal ? "is-active" : ""}`}
+          onClick=${openPromptCenter}
+          title="预览管理提示词"
+          disabled=${loading}
+        >
+          <${BookText} className="h-4 w-4" />
+          <span>提示词</span>
+        </button>
+      </div>
+    </aside>
     <div className="dialog-shell">
       <header className="dialog-header">
         <div>
@@ -829,7 +1644,10 @@ function App() {
               <span>新会话</span>
             </button>
           </div>
-          <${ThemeSwitcher} theme=${theme} setTheme=${setTheme} />
+          <${ThemeSwitcher}
+            theme=${uiState.theme}
+            setTheme=${(nextTheme) => setUiState((current) => normalizeUiState({ ...current, theme: nextTheme }))}
+          />
           <div className="thread-meta">thread_id: ${threadId}</div>
         </div>
       </header>
@@ -849,7 +1667,9 @@ function App() {
                 key=${session.id || index}
                 session=${session}
                 error=${session.error}
-                onOpenAgent=${setSelectedAgent}
+                onOpenAgent=${(agent) =>
+                  setUiState((current) => normalizeUiState({ ...current, selectedAgentId: agent?.id || "" }))}
+                onOpenFile=${handleOpenArtifact}
               />`
             )
           : html`<div className="empty-thread">发送一条消息后，这里会按轮次保留完整问答记录。</div>`}
@@ -857,37 +1677,199 @@ function App() {
 
       <div className="composer-dock">
         <div className="composer-stack">
-          <div className="composer-model-bubble">Model: ${modelName || "unknown"}</div>
-          <div className="composer-shell">
-            <label className="composer-input-wrap" aria-label="User Query">
-              <span className="composer-label">User Query</span>
-              <textarea
-                value=${query}
-                onChange=${(event) => setQuery(event.target.value)}
-                onKeyDown=${handleComposerKeyDown}
-                className="composer-area"
-                placeholder="给 Supervisor 输入一个需要拆解并调度多 worker 的任务"
-              ></textarea>
-            </label>
-            <div className="composer-actions composer-actions-minimal">
-              <button
-                type="button"
-                onClick=${loading ? handleStop : handleRun}
-                className=${`primary-button send-button ${loading ? "stop-button" : ""}`}
-                aria-label=${loading ? "停止执行" : "发送"}
-              >
-                ${loading ? html`<${Square} className="h-4 w-4" />` : html`<${ArrowUp} className="h-4 w-4" />`}
-              </button>
-            </div>
-          </div>
+          ${loading
+            ? html`<div className="composer-shell is-collapsed">
+                <div className="composer-collapsed-note">
+                  <${LoaderCircle} className="h-4 w-4 animate-spin" />
+                  <span>Supervisor 正在执行，对话框已收起</span>
+                </div>
+                <div className="composer-actions composer-actions-minimal">
+                  <button
+                    type="button"
+                    onClick=${handleStop}
+                    className="primary-button send-button stop-button"
+                    aria-label="停止执行"
+                  >
+                    <${Square} className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>`
+            : html`<div className="composer-model-bubble">Model: ${modelName || "unknown"}</div>
+                <div className="composer-shell">
+                  <label className="composer-input-wrap" aria-label="User Query">
+                      <span className="composer-label">User Query</span>
+                    <textarea
+                      value=${uiState.query}
+                      onChange=${(event) => setUiState((current) => normalizeUiState({ ...current, query: event.target.value }))}
+                      onKeyDown=${handleComposerKeyDown}
+                      className="composer-area"
+                      placeholder="给 Supervisor 输入一个需要拆解并调度多 worker 的任务"
+                    ></textarea>
+                  </label>
+                  <div className="composer-actions composer-actions-minimal">
+                    <button
+                      type="button"
+                      onClick=${handleRun}
+                      className="primary-button send-button"
+                      aria-label="发送"
+                    >
+                      <${ArrowUp} className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>`}
         </div>
       </div>
     </div>
 
     <${Modal}
+      open=${uiState.showHistoryModal}
+      title="历史会话"
+      eyebrow="历史会话"
+      onClose=${() => setUiState((current) => normalizeUiState({ ...current, showHistoryModal: false }))}
+      variant="prompt-center"
+    >
+      <${HistoryCenter}
+        threads=${historyThreads}
+        activeThreadId=${threadId}
+        onSelectThread=${handleSelectThread}
+        onDeleteThread=${(targetThreadId) => setDeleteConfirm({ open: true, threadId: targetThreadId })}
+        deletingThreadId=${deletingThreadId}
+        loading=${historyThreadsLoading}
+        error=${historyThreadsError}
+      />
+    </${Modal}>
+
+    <${Modal}
+      open=${deleteConfirm.open}
+      title="删除历史线程"
+      eyebrow="历史会话"
+      onClose=${() => (deletingThreadId ? null : setDeleteConfirm(EMPTY_DELETE_CONFIRM))}
+      variant="confirm"
+    >
+      <div className="stack-block confirm-stack">
+        <div className="note-block">
+          该操作会删除这条线程下的全部会话历史和线程级 UI 状态，且无法恢复。
+        </div>
+        <div className="info-card wide">
+          <div className="info-label">Thread ID</div>
+          <div className="info-value">${deleteConfirm.threadId || "-"}</div>
+        </div>
+        <div className="prompt-toolbar-actions confirm-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick=${() => setDeleteConfirm(EMPTY_DELETE_CONFIRM)}
+            disabled=${Boolean(deletingThreadId)}
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            className="primary-button stop-button"
+            onClick=${() => handleDeleteThread(deleteConfirm.threadId)}
+            disabled=${Boolean(deletingThreadId)}
+          >
+            ${deletingThreadId ? html`<${LoaderCircle} className="h-4 w-4 animate-spin" />` : html`<${Trash2} className="h-4 w-4" />`}
+            <span>${deletingThreadId ? "删除中" : "确认删除"}</span>
+          </button>
+        </div>
+      </div>
+    </${Modal}>
+
+    <${Modal}
+      open=${uiState.showPromptModal}
+      title="管理提示词预览"
+      eyebrow="提示词管理"
+      onClose=${() => setUiState((current) => normalizeUiState({ ...current, showPromptModal: false }))}
+      variant="prompt-center"
+    >
+      <${PromptCenter}
+        prompts=${promptSections}
+        activePromptId=${uiState.activePromptId}
+        onSelect=${(nextPromptId) =>
+          setUiState((current) => {
+            const matched = promptSections.find((item) => item.id === nextPromptId) || null;
+            return normalizeUiState({
+              ...current,
+              activePromptId: nextPromptId,
+              promptDraft: matched?.content || "",
+            });
+          })}
+        loading=${promptLoading}
+        error=${promptError}
+        draftContent=${uiState.promptDraft}
+        onDraftChange=${(nextDraft) => setUiState((current) => normalizeUiState({ ...current, promptDraft: nextDraft }))}
+        onSave=${handleSavePrompt}
+        onReset=${handleResetPrompt}
+        saveFeedback=${promptSaveFeedback}
+        saveFeedbackTone=${promptSaveFeedbackTone}
+        saving=${promptSaving}
+        resetting=${promptResetting}
+      />
+    </${Modal}>
+
+    <${Modal}
+      open=${uiState.showArtifactModal && Boolean(activeArtifact)}
+      title=${activeArtifact ? activeArtifact.title || activeArtifact.name : "文件预览"}
+      eyebrow="文件预览"
+      onClose=${() =>
+        setUiState((current) =>
+          normalizeUiState({ ...current, showArtifactModal: false, activeArtifactPath: "" }))}
+      variant="file-preview"
+    >
+      ${
+        activeArtifact
+          ? html`<div className="stack-block file-preview-stack">
+              <div className="prompt-meta-card">
+                <div>
+                  <div className="summary-title">${activeArtifact.title || activeArtifact.name}</div>
+                  <div className="summary-subtitle">${formatUtc8Timestamp(activeArtifact.updated_at)}</div>
+                </div>
+                <span className="tag">${activeArtifact.extension || "(无后缀)"}</span>
+              </div>
+              <div className="prompt-toolbar">
+                <span className="prompt-toolbar-note">${formatFileSize(activeArtifact.size)} · ${activeArtifact.mime_type}</span>
+                <div className="prompt-toolbar-actions">
+                  ${["markdown", "text"].includes(classifyArtifact(activeArtifact))
+                    ? html`<button type="button" className="secondary-button" onClick=${handleSaveArtifact} disabled=${artifactSaving}>
+                        ${artifactSaving ? html`<${LoaderCircle} className="h-4 w-4 animate-spin" />` : null}
+                        <span>${artifactSaving ? "保存中" : "保存修改"}</span>
+                      </button>`
+                    : null}
+                  <a href=${activeArtifact.download_url} className="primary-button" download>
+                    <span>下载文件</span>
+                  </a>
+                </div>
+              </div>
+              ${artifactSaveFeedback ? html`<div className=${artifactSaveFeedback.startsWith("保存失败") ? "alert-block" : "success-block"}>${artifactSaveFeedback}</div>` : null}
+              ${
+                ["markdown", "text"].includes(classifyArtifact(activeArtifact))
+                  ? html`<div className="artifact-editor-grid">
+                      <label className="form-field artifact-editor-pane">
+                        <div className="form-label">编辑内容</div>
+                        <textarea
+                          className="field-control field-area prompt-editor artifact-editor"
+                          value=${artifactDraft}
+                          onChange=${(event) => setArtifactDraft(event.target.value)}
+                          spellCheck="false"
+                        ></textarea>
+                      </label>
+                      <div className="stack-block artifact-preview-pane">
+                        <div className="form-label">预览</div>
+                        <${FilePreviewContent} file=${activeArtifact} previewState=${artifactPreview.loading ? artifactPreview : { ...artifactPreview, text: artifactDraft, html: classifyArtifact(activeArtifact) === "markdown" ? DOMPurify.sanitize(marked.parse(artifactDraft, { gfm: true, breaks: true }), { USE_PROFILES: { html: true } }) : "" }} />
+                      </div>
+                    </div>`
+                  : html`<${FilePreviewContent} file=${activeArtifact} previewState=${artifactPreview} />`
+              }
+            </div>`
+          : html`<div className="empty-block">未找到文件产物。</div>`
+      }
+    </${Modal}>
+
+    <${Modal}
       open=${Boolean(selectedAgent)}
       title=${selectedAgent ? `${selectedAgent.name} Metadata` : ""}
-      onClose=${() => setSelectedAgent(null)}
+      onClose=${() => setUiState((current) => normalizeUiState({ ...current, selectedAgentId: "" }))}
     >
       ${
         selectedAgent
@@ -905,49 +1887,6 @@ function App() {
       }
     </${Modal}>
 
-    <${Modal} open=${showAddModal} title="新增子 Agent" onClose=${() => setShowAddModal(false)}>
-      <form className="form-stack" onSubmit=${handleCreateAgent}>
-        <${FormInput}
-          label="Agent ID"
-          value=${agentForm.name}
-          onChange=${(value) => setAgentForm((current) => ({ ...current, name: value }))}
-          placeholder="research_worker"
-        />
-        <${FormInput}
-          label="Display name"
-          value=${agentForm.display_name}
-          onChange=${(value) => setAgentForm((current) => ({ ...current, display_name: value }))}
-          placeholder="Research Worker"
-        />
-        <${FormInput}
-          label="Role"
-          value=${agentForm.role}
-          onChange=${(value) => setAgentForm((current) => ({ ...current, role: value }))}
-          placeholder="负责特定维度的信息收集与执行"
-        />
-        <${FormArea}
-          label="Description"
-          value=${agentForm.description}
-          onChange=${(value) => setAgentForm((current) => ({ ...current, description: value }))}
-          placeholder="用于处理一个被 supervisor 分配的独立维度任务。"
-          rows=${3}
-        />
-        <${FormArea}
-          label="System prompt"
-          value=${agentForm.system_prompt}
-          onChange=${(value) => setAgentForm((current) => ({ ...current, system_prompt: value }))}
-          placeholder="你是一个并行 worker..."
-          rows=${6}
-        />
-        <div className="composer-actions">
-          <button type="submit" className="primary-button">
-            <${Plus} className="h-4 w-4" />
-            创建子 Agent
-          </button>
-          ${formFeedback ? html`<div className="form-feedback">${formFeedback}</div>` : null}
-        </div>
-      </form>
-    </${Modal}>
   </div>`;
 }
 
@@ -976,26 +1915,6 @@ function InfoCard({ label, value, wide = false }) {
     <div className="info-label">${label}</div>
     <div className="info-value">${value}</div>
   </div>`;
-}
-
-function FormInput({ label, value, onChange, placeholder }) {
-  return html`<label className="form-field">
-    <div className="form-label">${label}</div>
-    <input value=${value} onChange=${(event) => onChange(event.target.value)} placeholder=${placeholder} className="field-control" />
-  </label>`;
-}
-
-function FormArea({ label, value, onChange, placeholder, rows }) {
-  return html`<label className="form-field">
-    <div className="form-label">${label}</div>
-    <textarea
-      rows=${rows}
-      value=${value}
-      onChange=${(event) => onChange(event.target.value)}
-      placeholder=${placeholder}
-      className="field-control field-area"
-    ></textarea>
-  </label>`;
 }
 
 const rootElement = document.getElementById("root");

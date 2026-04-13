@@ -1,0 +1,26 @@
+services:
+  deep-agent-sandbox:
+    image: python:3.13-slim
+    container_name: deep-agent-sandbox
+    working_dir: /workspace
+    command: sleep infinity
+    restart: unless-stopped
+    volumes:
+      - ./workspace:/workspace
+
+  postgresql:
+    image: pgvector/pgvector:pg17
+    container_name: postgresql
+    environment:
+      POSTGRES_USER: postgresql
+      POSTGRES_PASSWORD: postgresql
+      POSTGRES_DB: postgresql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+volumes:
+  pg_data:

@@ -9,7 +9,7 @@ from typing import Sequence
 
 from dotenv import load_dotenv
 
-from app.prompts import DEFAULT_USER_PROMPT
+from app.prompts import get_default_user_prompt
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -64,6 +64,11 @@ class Settings:
     docker_container_name: str
     docker_workspace_dir: str
     docker_timeout: int
+    pg_host: str
+    pg_port: int
+    pg_user: str
+    pg_password: str
+    pg_database: str
 
 
 def load_settings(argv: Sequence[str] | None = None) -> Settings:
@@ -73,7 +78,7 @@ def load_settings(argv: Sequence[str] | None = None) -> Settings:
     parser = argparse.ArgumentParser(description="LangChain create_deep_agent logging demo")
     parser.add_argument(
         "--prompt",
-        default=DEFAULT_USER_PROMPT,
+        default=get_default_user_prompt(),
         help="发送给 deep agent 的用户问题。",
     )
     parser.add_argument(
@@ -117,6 +122,32 @@ def load_settings(argv: Sequence[str] | None = None) -> Settings:
         type=int,
         help="Default command timeout in seconds for Docker-backed execute().",
     )
+    parser.add_argument(
+        "--pg-host",
+        default=env_str("DEEP_AGENT_PG_HOST", "127.0.0.1"),
+        help="PostgreSQL host for chat history persistence.",
+    )
+    parser.add_argument(
+        "--pg-port",
+        default=env_int("DEEP_AGENT_PG_PORT", 5432),
+        type=int,
+        help="PostgreSQL port for chat history persistence.",
+    )
+    parser.add_argument(
+        "--pg-user",
+        default=env_str("DEEP_AGENT_PG_USER", "postgresql"),
+        help="PostgreSQL user for chat history persistence.",
+    )
+    parser.add_argument(
+        "--pg-password",
+        default=env_str("DEEP_AGENT_PG_PASSWORD", "postgresql"),
+        help="PostgreSQL password for chat history persistence.",
+    )
+    parser.add_argument(
+        "--pg-database",
+        default=env_str("DEEP_AGENT_PG_DATABASE", "postgresql"),
+        help="PostgreSQL database for chat history persistence.",
+    )
     args = parser.parse_args(argv)
 
     api_key = env_str("OPENAI_API_KEY") or env_str("DASHSCOPE_API_KEY")
@@ -138,4 +169,9 @@ def load_settings(argv: Sequence[str] | None = None) -> Settings:
         docker_container_name=args.docker_container_name,
         docker_workspace_dir=args.docker_workspace_dir,
         docker_timeout=args.docker_timeout,
+        pg_host=args.pg_host,
+        pg_port=args.pg_port,
+        pg_user=args.pg_user,
+        pg_password=args.pg_password,
+        pg_database=args.pg_database,
     )

@@ -4,3 +4,4 @@ langgraph>=1.1.0
 langchain-openai>=1.1.10
 paramiko>=3.5.0
 python-dotenv>=1.0.1
+psycopg[binary]>=3.2.3
