@@ -40,6 +40,9 @@ const DEFAULT_QUERY = "";
 const MAX_USER_FILE_SIZE = 10 * 1024;
 const MAX_USER_FILE_COUNT = 3;
 const ALLOWED_USER_FILE_EXTENSIONS = [".md", ".xlsx", ".csv", ".txt", ".py"];
+const LAST_THREAD_STORAGE_KEY = "demo-last-thread-id";
+const HISTORY_CACHE_PREFIX = "demo-history-cache:";
+const SESSION_USER_FILES_CACHE_PREFIX = "demo-session-user-files:";
 
 const THEMES = [
   { id: "vscode-light", label: "VS Code Light", icon: MonitorCog },
@@ -191,6 +194,115 @@ function mergeSessionState(existingState, nextState) {
     ...normalizedNext,
     user_files: preservedUserFiles,
   };
+}
+
+function historyCacheKey(threadId) {
+  return `${HISTORY_CACHE_PREFIX}${threadId}`;
+}
+
+function sessionUserFilesCacheKey(threadId, sessionId) {
+  return `${SESSION_USER_FILES_CACHE_PREFIX}${threadId}:${sessionId}`;
+}
+
+function sanitizeUserFiles(files = []) {
+  if (!Array.isArray(files)) return [];
+  return files
+    .filter((file) => file && typeof file === "object")
+    .map((file) => ({
+      id: file.id || "",
+      path: file.path || "",
+      name: file.name || "",
+      title: file.title || "",
+      extension: file.extension || "",
+      size: typeof file.size === "number" ? file.size : 0,
+      updated_at: file.updated_at || "",
+      mime_type: file.mime_type || "",
+      preview_url: file.preview_url || "",
+      preview_json_url: file.preview_json_url || "",
+      download_url: file.download_url || "",
+      original_name: file.original_name || file.name || "",
+      source: file.source || "user_upload",
+    }));
+}
+
+function readCachedSessionUserFiles(threadId, sessionId) {
+  if (!threadId || !sessionId) return [];
+  try {
+    const raw = window.localStorage.getItem(sessionUserFilesCacheKey(threadId, sessionId));
+    if (!raw) return [];
+    return sanitizeUserFiles(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+}
+
+function writeCachedSessionUserFiles(threadId, sessionId, userFiles) {
+  if (!threadId || !sessionId) return;
+  try {
+    const sanitized = sanitizeUserFiles(userFiles);
+    if (!sanitized.length) return;
+    window.localStorage.setItem(sessionUserFilesCacheKey(threadId, sessionId), JSON.stringify(sanitized));
+  } catch {
+    return;
+  }
+}
+
+function removeCachedSessionUserFilesForThread(threadId) {
+  if (!threadId) return;
+  try {
+    const prefix = `${SESSION_USER_FILES_CACHE_PREFIX}${threadId}:`;
+    for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+      const key = window.localStorage.key(index);
+      if (key && key.startsWith(prefix)) {
+        window.localStorage.removeItem(key);
+      }
+    }
+  } catch {
+    return;
+  }
+}
+
+function hydrateSessionUserFiles(threadId, session) {
+  const localUserFiles = readCachedSessionUserFiles(threadId, session.id);
+  if (!localUserFiles.length) return session;
+  return {
+    ...session,
+    state: mergeSessionState({ ...session.state, user_files: localUserFiles }, session.state),
+  };
+}
+
+function sanitizeHistorySessions(sessions = []) {
+  return sessions.map((session) => ({
+    id: session.id,
+    query: session.query || "",
+    state: normalizeSessionState(session.state),
+    error: session.error || "",
+  }));
+}
+
+function readCachedThreadHistory(threadId) {
+  if (!threadId) return [];
+  try {
+    const raw = window.localStorage.getItem(historyCacheKey(threadId));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? sanitizeHistorySessions(parsed) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeCachedThreadHistory(threadId, sessions) {
+  if (!threadId) return;
+  try {
+    const sanitized = sanitizeHistorySessions(sessions);
+    window.localStorage.setItem(historyCacheKey(threadId), JSON.stringify(sanitized));
+    for (const session of sanitized) {
+      writeCachedSessionUserFiles(threadId, session.id, session.state?.user_files || []);
+    }
+  } catch {
+    return;
+  }
 }
 
 function validatePendingUserFile(file) {
@@ -995,6 +1107,7 @@ function PromptCenter({
   saveFeedbackTone,
   saving,
   resetting,
+  readOnly = false,
 }) {
   const activePrompt = prompts.find((item) => item.id === activePromptId) || prompts[0] || null;
 
@@ -1037,13 +1150,15 @@ function PromptCenter({
                     <span className="tag">${activePrompt.source}</span>
                   </div>
                   <div className="prompt-toolbar">
-                    <span className="prompt-toolbar-note">修改后点击保存，后端会立即更新并影响后续运行。</span>
+                    <span className="prompt-toolbar-note">
+                      ${readOnly ? "执行中可查看提示词，但暂不允许修改或保存。" : "修改后点击保存，后端会立即更新并影响后续运行。"}
+                    </span>
                     <div className="prompt-toolbar-actions">
-                      <button type="button" className="secondary-button" onClick=${onReset} disabled=${saving || resetting}>
+                      <button type="button" className="secondary-button" onClick=${onReset} disabled=${readOnly || saving || resetting}>
                         ${resetting ? html`<${LoaderCircle} className="h-4 w-4 animate-spin" />` : null}
                         <span>${resetting ? "恢复中" : "恢复默认"}</span>
                       </button>
-                      <button type="button" className="primary-button" onClick=${onSave} disabled=${saving || resetting}>
+                      <button type="button" className="primary-button" onClick=${onSave} disabled=${readOnly || saving || resetting}>
                         ${saving ? html`<${LoaderCircle} className="h-4 w-4 animate-spin" />` : null}
                         <span>${saving ? "保存中" : "保存提示词"}</span>
                       </button>
@@ -1055,6 +1170,7 @@ function PromptCenter({
                     value=${draftContent}
                     onChange=${(event) => onDraftChange(event.target.value)}
                     spellCheck="false"
+                    readOnly=${readOnly}
                   ></textarea>
                 </div>`
               : html`<div className="empty-block">请选择左侧的提示词模块。</div>`
@@ -1063,7 +1179,16 @@ function PromptCenter({
   </div>`;
 }
 
-function HistoryCenter({ threads, activeThreadId, onSelectThread, onDeleteThread, deletingThreadId, loading, error }) {
+function HistoryCenter({
+  threads,
+  activeThreadId,
+  onSelectThread,
+  onDeleteThread,
+  deletingThreadId,
+  loading,
+  error,
+  interactionLocked = false,
+}) {
   if (loading) {
     return html`<div className="empty-block">
       <span className="loading-inline">
@@ -1091,6 +1216,7 @@ function HistoryCenter({ threads, activeThreadId, onSelectThread, onDeleteThread
           type="button"
           className="history-thread-main"
           onClick=${() => onSelectThread(thread.thread_id)}
+          disabled=${interactionLocked}
         >
           <div className="history-thread-head">
             <div className="history-thread-title">${thread.thread_id}</div>
@@ -1104,7 +1230,7 @@ function HistoryCenter({ threads, activeThreadId, onSelectThread, onDeleteThread
           className="icon-button history-thread-delete"
           aria-label="删除历史线程"
           title="删除历史线程"
-          disabled=${deletingThreadId === thread.thread_id}
+          disabled=${interactionLocked || deletingThreadId === thread.thread_id}
           onClick=${(event) => {
             event.stopPropagation();
             onDeleteThread(thread.thread_id);
@@ -1155,7 +1281,7 @@ function App() {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [threadId, setThreadId] = useState(() => createThreadId());
+  const [threadId, setThreadId] = useState(() => window.localStorage.getItem(LAST_THREAD_STORAGE_KEY) || createThreadId());
   const [modelName, setModelName] = useState("");
   const [promptSections, setPromptSections] = useState([]);
   const [promptLoading, setPromptLoading] = useState(false);
@@ -1223,6 +1349,16 @@ function App() {
     document.documentElement.dataset.theme = uiState.theme;
     window.localStorage.setItem("demo-theme", uiState.theme);
   }, [uiState.theme]);
+
+  useEffect(() => {
+    if (!threadId) return;
+    window.localStorage.setItem(LAST_THREAD_STORAGE_KEY, threadId);
+  }, [threadId]);
+
+  useEffect(() => {
+    if (!threadId) return;
+    writeCachedThreadHistory(threadId, history);
+  }, [threadId, history]);
 
   useEffect(() => {
     if (!uiState.showArtifactModal || activeArtifact || !uiState.activeArtifactPath) return;
@@ -1322,7 +1458,10 @@ function App() {
 
   async function loadHistory() {
     try {
-      const response = await fetch("/api/demo/history");
+      const cachedThreadId = window.localStorage.getItem(LAST_THREAD_STORAGE_KEY) || threadId;
+      const cachedSessions = readCachedThreadHistory(cachedThreadId);
+      const endpoint = cachedThreadId ? `/api/demo/history?thread_id=${encodeURIComponent(cachedThreadId)}` : "/api/demo/history";
+      const response = await fetch(endpoint);
       const payload = await parseApiResponse(response);
       if (!response.ok) return;
       const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
@@ -1332,6 +1471,14 @@ function App() {
         state: mergeSessionState(cloneBaseState(), session.state),
         error: session.error || "",
       }));
+      const mergedSessions =
+        normalizedSessions.length || !cachedSessions.length
+          ? normalizedSessions.map((session) => {
+              const cached = cachedSessions.find((item) => item.id === session.id);
+              const merged = cached ? { ...session, state: mergeSessionState(cached.state, session.state) } : session;
+              return hydrateSessionUserFiles(payload.thread_id || cachedThreadId, merged);
+            })
+          : cachedSessions.map((session) => hydrateSessionUserFiles(cachedThreadId, session));
       if (payload.thread_id) {
         setThreadId(payload.thread_id);
       }
@@ -1345,9 +1492,9 @@ function App() {
         })
       );
       setPendingUserFiles([]);
-      if (normalizedSessions.length) {
-        setHistory(normalizedSessions);
-        const lastSession = normalizedSessions[normalizedSessions.length - 1];
+      if (mergedSessions.length) {
+        setHistory(mergedSessions);
+        const lastSession = mergedSessions[mergedSessions.length - 1];
         setDemoState(normalizeSessionState(lastSession.state));
         setError(lastSession.error || "");
       }
@@ -1550,9 +1697,14 @@ function App() {
         })
       );
       setPendingUserFiles([]);
-      setHistory(normalizedSessions);
-      if (normalizedSessions.length) {
-        const lastSession = normalizedSessions[normalizedSessions.length - 1];
+      const mergedSessions = normalizedSessions.map((session) => {
+        const cached = readCachedThreadHistory(payload.thread_id || nextThreadId).find((item) => item.id === session.id);
+        const merged = cached ? { ...session, state: mergeSessionState(cached.state, session.state) } : session;
+        return hydrateSessionUserFiles(payload.thread_id || nextThreadId, merged);
+      });
+      setHistory(mergedSessions);
+      if (mergedSessions.length) {
+        const lastSession = mergedSessions[mergedSessions.length - 1];
         setDemoState(normalizeSessionState(lastSession.state));
         setError(lastSession.error || "");
       } else {
@@ -1577,6 +1729,7 @@ function App() {
 
       const remainingThreads = historyThreads.filter((thread) => thread.thread_id !== targetThreadId);
       setHistoryThreads(remainingThreads);
+      removeCachedSessionUserFilesForThread(targetThreadId);
 
       if (threadId !== targetThreadId) {
         return;
@@ -1589,6 +1742,7 @@ function App() {
 
       setThreadId(createThreadId());
       setHistory([]);
+      window.localStorage.removeItem(historyCacheKey(threadId));
       setError("");
       setDemoState((current) => ({
         ...cloneBaseState(),
@@ -1795,20 +1949,50 @@ function App() {
       status: "running",
       scheduler_thought: "Supervisor 正在分析 query，准备建立本轮 Action List。",
     };
+    const nextSessionRecord = {
+      id: sessionId,
+      query: trimmed,
+      state: nextState,
+      error: "",
+    };
+    const nextHistory = [...history, nextSessionRecord];
     setDemoState(nextState);
-    setHistory((current) => [
-      ...current,
-      {
-        id: sessionId,
-        query: trimmed,
-        state: nextState,
-        error: "",
-      },
-    ]);
+    setHistory(nextHistory);
+    writeCachedThreadHistory(threadId, nextHistory);
+    writeCachedSessionUserFiles(threadId, sessionId, localUserFiles);
     setUiState((current) => normalizeUiState({ ...current, query: DEFAULT_QUERY }));
     setPendingUserFiles([]);
 
     try {
+      const draftPayload = {
+        ...nextState,
+        user_files: (nextState.user_files || []).map((item) => ({
+          id: item.id,
+          path: item.path,
+          name: item.name,
+          title: item.title,
+          extension: item.extension,
+          size: item.size,
+          updated_at: item.updated_at,
+          mime_type: item.mime_type,
+          preview_url: item.preview_url,
+          preview_json_url: item.preview_json_url,
+          download_url: item.download_url,
+          original_name: item.original_name || item.name,
+          source: "user_upload",
+        })),
+      };
+      await fetch("/api/demo/session-draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          thread_id: threadId,
+          session_id: sessionId,
+          query: trimmed,
+          payload: draftPayload,
+        }),
+      }).catch(() => {});
+
       const controller = new AbortController();
       runControllerRef.current = controller;
         const response = await fetch("/api/demo/run", {
@@ -2061,7 +2245,6 @@ function App() {
           className=${`side-menu-button ${uiState.showHistoryModal ? "is-active" : ""}`}
           onClick=${openHistoryCenter}
           title="查看历史会话"
-          disabled=${loading}
         >
           <${Clock3} className="h-4 w-4" />
           <span>历史</span>
@@ -2071,7 +2254,6 @@ function App() {
           className=${`side-menu-button ${uiState.showPromptModal ? "is-active" : ""}`}
           onClick=${openPromptCenter}
           title="预览管理提示词"
-          disabled=${loading}
         >
           <${BookText} className="h-4 w-4" />
           <span>提示词</span>
@@ -2262,6 +2444,7 @@ function App() {
         deletingThreadId=${deletingThreadId}
         loading=${historyThreadsLoading}
         error=${historyThreadsError}
+        interactionLocked=${loading}
       />
     </${Modal}>
 
@@ -2331,6 +2514,7 @@ function App() {
         saveFeedbackTone=${promptSaveFeedbackTone}
         saving=${promptSaving}
         resetting=${promptResetting}
+        readOnly=${loading}
       />
     </${Modal}>
 

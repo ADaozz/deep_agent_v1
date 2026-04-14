@@ -58,6 +58,9 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/demo/user-file":
             self._handle_upload_user_file()
             return
+        if self.path == "/api/demo/session-draft":
+            self._handle_upsert_session_draft()
+            return
         if self.path != "/api/demo/run":
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown API endpoint")
             return
@@ -266,6 +269,44 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
             return
 
         self._send_json({"ok": True, "file": file_payload}, status=HTTPStatus.OK)
+
+    def _handle_upsert_session_draft(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length) if content_length else b"{}"
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._send_json({"error": "invalid_json"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        thread_id = str(payload.get("thread_id", "")).strip()
+        session_id = str(payload.get("session_id", "")).strip()
+        query = str(payload.get("query", "")).strip()
+        session_payload = payload.get("payload")
+
+        if not thread_id:
+            self._send_json({"error": "thread_id_required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not session_id:
+            self._send_json({"error": "session_id_required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not query:
+            self._send_json({"error": "query_required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not isinstance(session_payload, dict):
+            self._send_json({"error": "payload_must_be_object"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        settings = load_settings(argv=[])
+        upsert_chat_session(
+            settings=settings,
+            thread_id=thread_id,
+            session_id=session_id,
+            query_text=query,
+            payload=session_payload,
+            error_text="",
+        )
+        self._send_json({"ok": True}, status=HTTPStatus.OK)
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
