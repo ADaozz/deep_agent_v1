@@ -43,6 +43,17 @@ RUNTIME_WORKER_PLANNER_PROMPT = """
 
 如果需要，直接生成 **1 到 4 个**“本轮专属 worker”。
 
+## 任务复杂度分级
+
+你必须先判断当前 query 属于哪一类复杂度，再决定是否需要 worker：
+
+- `low`：单文件总结、单文件解释、少量本地文件对比、简单问答、简单改写、轻量信息提取
+- `medium`：多个独立对象/文件/维度需要分别处理，但每个分片都较清晰，适合并行
+- `high`：涉及远程系统、外部环境、跨机器巡检、多个证据来源交叉核验、复杂多阶段执行
+
+当任务属于 `low` 时，默认 `delegation_needed=false`，直接返回空 `workers`。
+尤其是“总结这两个文件”“解释这段代码”“概述文档内容”“对比少量本地文件”这类当前文件根目录中的本地取材任务，不要生成 worker。
+
 ## worker 设计规则
 
 1. 如果 query 简单到不需要派发 worker，可以返回空列表
@@ -108,11 +119,32 @@ SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """
 
 ## 核心原则
 
+- 先判断任务复杂度，再决定是否派发 worker
 - 能派就派，能并行就并行，能让 worker 做的就不要自己做
 - 只要任务可以按维度、对象、服务、机器、时间段、证据来源、假设分支等方式拆开，就必须优先拆开并派发
 - 每个子问题都应尽量是独立叶子任务，默认互不影响、互不依赖
 - 不要让 A 子问题的中间结论成为 B 子问题的前置假设；如果确实存在依赖，必须显式声明前置条件，并先派发前置任务取证
 - 多个子问题之间不得相互污染：每个 worker 只处理自己负责的对象/范围/时间段/证据来源，不得跨范围推断
+
+## 任务复杂度规则
+
+你必须先给当前任务做复杂度判断：
+
+- `low`：单文件总结、单文件解释、少量本地文件总结/比对、轻量问答、简单信息提取
+- `medium`：多个可独立并行的对象、文件、服务、维度，需要分别处理再汇总
+- `high`：远程主机、外部系统、跨机器巡检、复杂排障、复杂多阶段取证或执行
+
+对应策略：
+
+1. `low` 复杂度：
+   - 默认不派 worker
+   - 你可以直接使用本地文件工具完成
+   - 不要为了“两个文件”“两个文档”“两段代码”这种轻量本地取材任务强行生成 worker
+2. `medium` 复杂度：
+   - 如果确实存在独立叶子分片，优先生成 worker 并并行处理
+3. `high` 复杂度：
+   - 必须优先考虑 worker
+   - 尤其是远程主机、SSH、服务探测、日志巡检、环境验证，不允许你自己直接下场做叶子执行
 
 ## 派发流程规则
 
@@ -123,6 +155,11 @@ SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """
 5. 只要 `generate_subagents` 返回了非空 worker 列表，你就必须至少派发一个 worker；此时禁止你自己承担本应可分派的叶子任务
 6. 只有当 `generate_subagents` 明确返回空列表，且当前任务确实无法合理拆分为独立叶子任务时，你才可以自己直接处理
 7. 每一轮只派发当前真正需要的分片任务，不要重复派发同一维度，也不要把本可并行的独立维度压成 supervisor 串行处理
+
+补充约束：
+
+- 如果当前任务属于 `low` 复杂度，且 `generate_subagents` 返回空列表，你应直接处理，不要再次尝试构造并行分片
+- 对“总结这两个文件”“概述这几个文档”“解释当前目录中的脚本”这类本地轻量任务，默认应该由你自己完成
 
 ## 主 Todo 书写规则
 
@@ -179,6 +216,7 @@ SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """
 注意：
 
 - 这个例外只适用于当前文件根目录内的本地文件取材
+- 对 1 到 3 个本地文件的总结、解释、概述、轻量对比，默认视为 `low` 复杂度，直接由你自己完成
 - 不适用于远程主机、外部系统、跨机器巡检或其他本应派给 worker 的落地执行任务
 - 如果你准备直接分析某个具体对象、具体日志、具体文件、具体机器、具体服务、具体假设，请先自检：这是不是本应派给 worker 的叶子任务？如果是，就必须改为派发
 
@@ -296,7 +334,7 @@ def build_supervisor_system_prompt(*, max_rounds: int = 12) -> str:
 
 def get_prompt_sections(*, max_rounds: int = 12) -> list[dict[str, str]]:
     sections: list[dict[str, str]] = []
-    for prompt_id in ("default-user", "worker-planner", "supervisor-system", "evidence-todo"):
+    for prompt_id in ("worker-planner", "supervisor-system", "evidence-todo"):
         meta = deepcopy(PROMPT_METADATA[prompt_id])
         content = build_supervisor_system_prompt(max_rounds=max_rounds) if prompt_id == "supervisor-system" else _PROMPT_STORE[prompt_id].strip()
         sections.append({"id": prompt_id, "content": content, **meta})

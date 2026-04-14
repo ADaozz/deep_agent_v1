@@ -48,6 +48,7 @@ def build_workspace_file_card(relative_path: str, *, title: str = "") -> dict[st
         "updated_at": datetime.fromtimestamp(file_path.stat().st_mtime).isoformat(),
         "mime_type": mime_type,
         "preview_url": f"/api/demo/workspace-file?{query}",
+        "preview_json_url": f"/api/demo/workspace-file?{query}&format=json",
         "download_url": f"/api/demo/workspace-file?{query}&download=1",
     }
 

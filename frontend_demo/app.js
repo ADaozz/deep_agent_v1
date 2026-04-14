@@ -26,6 +26,7 @@ import {
   Square,
   TerminalSquare,
   Trash2,
+  Plus,
   X,
   XCircle,
 } from "lucide-react";
@@ -36,6 +37,9 @@ let mermaidReady = false;
 const MAX_ROUNDS = 12;
 const DEFAULT_THEME = "vscode-light";
 const DEFAULT_QUERY = "";
+const MAX_USER_FILE_SIZE = 10 * 1024;
+const MAX_USER_FILE_COUNT = 3;
+const ALLOWED_USER_FILE_EXTENSIONS = [".md", ".xlsx", ".csv", ".txt", ".py"];
 
 const THEMES = [
   { id: "vscode-light", label: "VS Code Light", icon: MonitorCog },
@@ -54,6 +58,7 @@ const EMPTY_STATE = {
   rounds: [],
   agents: [],
   files: [],
+  user_files: [],
   logs: [],
 };
 
@@ -153,8 +158,73 @@ function cloneBaseState() {
     rounds: [],
     agents: [],
     files: [],
+    user_files: [],
     logs: [],
   };
+}
+
+function fileExtension(name = "") {
+  const match = String(name).toLowerCase().match(/(\.[^.]+)$/);
+  return match ? match[1] : "";
+}
+
+function normalizeSessionState(snapshot = {}) {
+  return {
+    ...cloneBaseState(),
+    ...(snapshot || {}),
+    tasks: Array.isArray(snapshot?.tasks) ? snapshot.tasks : [],
+    rounds: Array.isArray(snapshot?.rounds) ? snapshot.rounds : [],
+    agents: Array.isArray(snapshot?.agents) ? snapshot.agents : [],
+    files: Array.isArray(snapshot?.files) ? snapshot.files : [],
+    user_files: Array.isArray(snapshot?.user_files) ? snapshot.user_files : [],
+    logs: Array.isArray(snapshot?.logs) ? snapshot.logs : [],
+  };
+}
+
+function mergeSessionState(existingState, nextState) {
+  const normalizedNext = normalizeSessionState(nextState);
+  const preservedUserFiles =
+    Array.isArray(existingState?.user_files) && existingState.user_files.length && !normalizedNext.user_files.length
+      ? existingState.user_files
+      : normalizedNext.user_files;
+  return {
+    ...normalizedNext,
+    user_files: preservedUserFiles,
+  };
+}
+
+function validatePendingUserFile(file) {
+  if (!file) return "请选择文件。";
+  const extension = fileExtension(file.name);
+  if (!ALLOWED_USER_FILE_EXTENSIONS.includes(extension)) {
+    return `仅支持 ${ALLOWED_USER_FILE_EXTENSIONS.join(", ")} 文件。`;
+  }
+  if (file.size > MAX_USER_FILE_SIZE) {
+    return `文件不能超过 ${formatFileSize(MAX_USER_FILE_SIZE)}。`;
+  }
+  return "";
+}
+
+function createPendingUserFile(file) {
+  return {
+    id: `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    file,
+    name: file.name,
+    title: file.name,
+    extension: fileExtension(file.name),
+    size: file.size,
+    updated_at: new Date().toISOString(),
+    mime_type: file.type || "application/octet-stream",
+    status: "queued",
+    progress: 0,
+    source: "user_upload",
+  };
+}
+
+function pendingUploadTone(status) {
+  if (status === "error") return "is-error";
+  if (status === "ready") return "is-ready";
+  return "is-uploading";
 }
 
 function formatUtc8Timestamp(value) {
@@ -186,8 +256,7 @@ function classifyArtifact(file) {
   const mimeType = (file?.mime_type || "").toLowerCase();
   const extension = (file?.extension || "").toLowerCase();
   const path = (file?.path || file?.name || "").toLowerCase();
-  if ([".xlsx", ".xls"].includes(extension)) return "spreadsheet";
-  if (extension === ".csv") return "text";
+  if ([".xlsx", ".xls", ".csv"].includes(extension)) return "spreadsheet";
   if (mimeType.startsWith("image/")) return "image";
   if (mimeType === "application/pdf" || path.endsWith(".pdf")) return "pdf";
   if (
@@ -482,7 +551,7 @@ function PublishedFileList({ files, onOpen }) {
             <${iconForArtifact(file)} className="h-4 w-4" />
           </div>
           <div className="artifact-card-head">
-            <div className="artifact-title">${file.title || file.name}</div>
+            <div className="artifact-title">${file.original_name || file.name || file.title}</div>
             <span className="tag artifact-ext-tag">${file.extension || "(无后缀)"}</span>
           </div>
           <div className="artifact-meta">${formatFileSize(file.size)} · ${formatUtc8Timestamp(file.updated_at)}</div>
@@ -493,6 +562,38 @@ function PublishedFileList({ files, onOpen }) {
             下载
           </a>
         </div>
+      </article>`
+    )}
+  </div>`;
+}
+
+function UserUploadList({ files, onOpen, compact = false }) {
+  if (!files.length) return null;
+
+  return html`<div className=${compact ? "artifact-grid artifact-grid-compact is-user-upload-compact" : "artifact-grid"}>
+    ${files.map(
+      (file, index) => html`<article
+        key=${file.id || file.path || file.name || index}
+        className=${`artifact-card is-user-upload ${compact ? "is-compact" : ""}`}
+      >
+        <button
+          type="button"
+          className="artifact-card-main"
+          onClick=${() => {
+            if (file.preview_url || file.download_url) onOpen(file);
+          }}
+          disabled=${!file.preview_url && !file.download_url}
+        >
+          <div className="artifact-icon-wrap">
+            <${iconForArtifact(file)} className="h-4 w-4" />
+          </div>
+          <div className="artifact-card-head">
+            <div className="artifact-title">${file.original_name || file.name || file.title}</div>
+            <span className="tag artifact-ext-tag">${file.extension || "(无后缀)"}</span>
+          </div>
+          <div className="artifact-meta">${formatFileSize(file.size)} · ${formatUtc8Timestamp(file.updated_at)}</div>
+          ${compact ? null : file.path ? html`<div className="artifact-path">${file.path}</div>` : null}
+        </button>
       </article>`
     )}
   </div>`;
@@ -592,6 +693,116 @@ function FinalSummaryContent({ content }) {
   ></div>`;
 }
 
+function SpreadsheetPreview({ data }) {
+  const sheets = Array.isArray(data?.sheets) ? data.sheets : [];
+  const [activeSheetName, setActiveSheetName] = useState(() => sheets[0]?.name || "");
+  const [hoverCell, setHoverCell] = useState({ row: -1, column: -1 });
+
+  useEffect(() => {
+    setActiveSheetName(sheets[0]?.name || "");
+  }, [data]);
+
+  const activeSheet = sheets.find((sheet) => sheet.name === activeSheetName) || sheets[0] || null;
+  if (!activeSheet) {
+    return html`<div className="empty-block">当前 Excel 文件没有可展示的 sheet。</div>`;
+  }
+
+  const rows = Array.isArray(activeSheet.rows) ? activeSheet.rows : [];
+  const maxColumnCount = Number(activeSheet.preview_column_count || 0);
+  const columnWidths = Array.isArray(activeSheet.column_widths) ? activeSheet.column_widths : [];
+
+  return html`<div className="spreadsheet-preview">
+    <div className="spreadsheet-toolbar">
+      <div className="spreadsheet-app-badge">Excel Preview</div>
+      <div className="spreadsheet-meta">
+        <span>${activeSheet.row_count || 0} 行</span>
+        <span>${activeSheet.column_count || 0} 列</span>
+        ${
+          activeSheet.truncated_rows || activeSheet.truncated_columns
+            ? html`<span>当前仅预览前 ${activeSheet.preview_row_count || 0} 行 / ${activeSheet.preview_column_count || 0} 列</span>`
+            : null
+        }
+      </div>
+    </div>
+    <div className="spreadsheet-tabs excel-tabs">
+      ${sheets.map(
+        (sheet) => html`<button
+          key=${sheet.name}
+          type="button"
+          className=${`spreadsheet-tab ${sheet.name === activeSheet.name ? "is-active" : ""}`}
+          onClick=${() => setActiveSheetName(sheet.name)}
+        >
+          ${sheet.name}
+        </button>`
+      )}
+    </div>
+    <div className="spreadsheet-formula-bar">
+      <span className="spreadsheet-name-box">${activeSheet.name}</span>
+      <span className="spreadsheet-fx">fx</span>
+      <span className="spreadsheet-formula-text">当前为只读预览，保留 Excel 风格网格与工作表层级。</span>
+    </div>
+    <div className="spreadsheet-table-wrap excel-frame">
+      <table className="spreadsheet-table excel-table">
+        <colgroup>
+          <col style=${{ width: "56px" }} />
+          ${Array.from({ length: maxColumnCount }, (_, index) => html`<col key=${`width-${index}`} style=${{ width: `${columnWidths[index] || 96}px` }} />`)}
+        </colgroup>
+        <tbody>
+          <tr>
+            <td className="excel-corner"></td>
+            ${Array.from({ length: maxColumnCount }, (_, index) => html`<td
+              key=${`col-${index}`}
+              className=${`excel-col-header ${hoverCell.column === index ? "is-hover-axis" : ""}`}
+            >
+              ${toSpreadsheetColumnName(index)}
+            </td>`)}
+          </tr>
+          ${rows.map(
+            (row, rowIndex) => html`<tr key=${rowIndex}>
+              <td className=${`excel-row-header ${hoverCell.row === rowIndex ? "is-hover-axis" : ""}`}>${rowIndex + 1}</td>
+              ${(Array.isArray(row) ? row : []).map((cell, cellIndex) => {
+                const startColumn = Number(cell?.column ?? cellIndex);
+                const colspan = Number(cell?.colspan || 1);
+                const rowspan = Number(cell?.rowspan || 1);
+                const isHovered =
+                  hoverCell.row >= rowIndex &&
+                  hoverCell.row < rowIndex + rowspan &&
+                  hoverCell.column >= startColumn &&
+                  hoverCell.column < startColumn + colspan;
+                const crossesHover =
+                  hoverCell.row === rowIndex ||
+                  (hoverCell.row > rowIndex && hoverCell.row < rowIndex + rowspan) ||
+                  hoverCell.column === startColumn;
+                return html`<td
+                  key=${`${rowIndex}-${startColumn}`}
+                  className=${`excel-cell ${isHovered ? "is-hover-cell" : ""} ${crossesHover ? "is-hover-axis" : ""}`}
+                  colSpan=${colspan}
+                  rowSpan=${rowspan}
+                  onMouseEnter=${() => setHoverCell({ row: rowIndex, column: startColumn })}
+                  onMouseLeave=${() => setHoverCell({ row: -1, column: -1 })}
+                >
+                  ${cell?.value || ""}
+                </td>`;
+              })}
+            </tr>`
+          )}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function toSpreadsheetColumnName(index) {
+  let current = index + 1;
+  let result = "";
+  while (current > 0) {
+    const remainder = (current - 1) % 26;
+    result = String.fromCharCode(65 + remainder) + result;
+    current = Math.floor((current - 1) / 26);
+  }
+  return result;
+}
+
 function FilePreviewContent({ file, previewState }) {
   const kind = classifyArtifact(file);
   if (!file) {
@@ -617,6 +828,9 @@ function FilePreviewContent({ file, previewState }) {
   if (kind === "markdown") {
     return html`<div className="md-content file-preview-markdown" dangerouslySetInnerHTML=${{ __html: previewState.html || "" }}></div>`;
   }
+  if (kind === "spreadsheet") {
+    return html`<${SpreadsheetPreview} data=${previewState.spreadsheet} />`;
+  }
   if (kind === "text") {
     return html`<pre className="prompt-code-block file-preview-code"><code>${previewState.text || ""}</code></pre>`;
   }
@@ -641,6 +855,7 @@ function FilePreviewContent({ file, previewState }) {
 
 function SessionTranscript({ session, error, onOpenAgent, onOpenFile }) {
   const state = session.state;
+  const userFiles = Array.isArray(state.user_files) ? state.user_files : [];
   const completedCount = state.tasks.filter((task) => stepState(task.status) === "success").length;
   const isErrorSession = Boolean(error) || state.status === "stopped";
   const errorText = error || (state.status === "stopped" ? state.stop_reason : "");
@@ -661,6 +876,7 @@ function SessionTranscript({ session, error, onOpenAgent, onOpenFile }) {
 
   return html`<div className="session-thread">
     <${ChatBubble} title="User Query" eyebrow="Input" icon=${MessageSquare} kind="user">
+      ${userFiles.length ? html`<${UserUploadList} files=${userFiles} onOpen=${onOpenFile} compact=${true} />` : null}
       <div className="user-query-text">${session.query}</div>
     </${ChatBubble}>
 
@@ -953,10 +1169,13 @@ function App() {
   const [historyThreadsError, setHistoryThreadsError] = useState("");
   const [deletingThreadId, setDeletingThreadId] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState(EMPTY_DELETE_CONFIRM);
-  const [artifactPreview, setArtifactPreview] = useState({ loading: false, error: "", text: "", html: "" });
+  const [artifactPreview, setArtifactPreview] = useState({ loading: false, error: "", text: "", html: "", spreadsheet: null });
   const [artifactDraft, setArtifactDraft] = useState("");
   const [artifactSaving, setArtifactSaving] = useState(false);
   const [artifactSaveFeedback, setArtifactSaveFeedback] = useState("");
+  const [pendingUserFiles, setPendingUserFiles] = useState([]);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadError, setUploadError] = useState("");
   const [uiState, setUiState] = useState(() => {
     const savedTheme = window.localStorage.getItem("demo-theme");
     return normalizeUiState({
@@ -965,7 +1184,10 @@ function App() {
     });
   });
   const runControllerRef = useRef(null);
+  const uploadControllersRef = useRef(new Map());
   const uiStateSaveTimerRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const artifactSelectionRef = useRef({ path: "", originalName: "", name: "" });
   const selectedAgent = useMemo(
     () => demoState.agents.find((agent) => agent.id === uiState.selectedAgentId) || null,
     [demoState.agents, uiState.selectedAgentId]
@@ -976,6 +1198,9 @@ function App() {
       for (const file of session.state?.files || []) {
         if (file?.path) items.set(file.path, file);
       }
+      for (const file of session.state?.user_files || []) {
+        if (file?.path) items.set(file.path, file);
+      }
     }
     return Array.from(items.values());
   }, [history]);
@@ -983,6 +1208,16 @@ function App() {
     () => publishedFiles.find((file) => file.path === uiState.activeArtifactPath) || null,
     [publishedFiles, uiState.activeArtifactPath]
   );
+  const activeArtifactKind = activeArtifact ? classifyArtifact(activeArtifact) : "";
+  const activeArtifactPreviewKey = activeArtifact
+    ? [
+        activeArtifactKind,
+        activeArtifact.path || "",
+        activeArtifact.updated_at || "",
+        activeArtifact.preview_url || "",
+        activeArtifact.preview_json_url || "",
+      ].join("|")
+    : "";
 
   useEffect(() => {
     document.documentElement.dataset.theme = uiState.theme;
@@ -990,33 +1225,54 @@ function App() {
   }, [uiState.theme]);
 
   useEffect(() => {
+    if (!uiState.showArtifactModal || activeArtifact || !uiState.activeArtifactPath) return;
+    const remembered = artifactSelectionRef.current;
+    const matched = publishedFiles.find(
+      (file) =>
+        (remembered.originalName && (file.original_name || file.name) === remembered.originalName) ||
+        (remembered.name && file.name === remembered.name)
+    );
+    if (!matched?.path || matched.path === uiState.activeArtifactPath) return;
+    setUiState((current) => normalizeUiState({ ...current, activeArtifactPath: matched.path }));
+  }, [uiState.showArtifactModal, uiState.activeArtifactPath, activeArtifact, publishedFiles]);
+
+  useEffect(() => {
     if (!uiState.showArtifactModal || !activeArtifact) {
-      setArtifactPreview({ loading: false, error: "", text: "", html: "" });
+      setArtifactPreview({ loading: false, error: "", text: "", html: "", spreadsheet: null });
       setArtifactDraft("");
       setArtifactSaveFeedback("");
       return undefined;
     }
-    const kind = classifyArtifact(activeArtifact);
-    if (!["markdown", "text"].includes(kind)) {
-      setArtifactPreview({ loading: false, error: "", text: "", html: "" });
+    const kind = activeArtifactKind;
+    if (!["markdown", "text", "spreadsheet"].includes(kind)) {
+      setArtifactPreview({ loading: false, error: "", text: "", html: "", spreadsheet: null });
       setArtifactDraft("");
       setArtifactSaveFeedback("");
       return undefined;
     }
 
     let cancelled = false;
-    setArtifactPreview({ loading: true, error: "", text: "", html: "" });
+    setArtifactPreview({ loading: true, error: "", text: "", html: "", spreadsheet: null });
     setArtifactDraft("");
     setArtifactSaveFeedback("");
-    fetch(activeArtifact.preview_url)
+    const previewTarget =
+      kind === "spreadsheet"
+        ? activeArtifact.preview_json_url || `${activeArtifact.preview_url}${activeArtifact.preview_url.includes("?") ? "&" : "?"}format=json`
+        : activeArtifact.preview_url;
+    fetch(previewTarget)
       .then((response) => {
         if (!response.ok) {
           throw new Error(`预览加载失败: HTTP ${response.status}`);
         }
-        return response.text();
+        return kind === "spreadsheet" ? response.json() : response.text();
       })
-      .then((text) => {
+      .then((payload) => {
         if (cancelled) return;
+        if (kind === "spreadsheet") {
+          setArtifactPreview({ loading: false, error: "", text: "", html: "", spreadsheet: payload });
+          return;
+        }
+        const text = payload;
         if (kind === "markdown") {
           const rawHtml = marked.parse(text, { gfm: true, breaks: true });
           setArtifactPreview({
@@ -1024,21 +1280,22 @@ function App() {
             error: "",
             text,
             html: DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true } }),
+            spreadsheet: null,
           });
           setArtifactDraft(text);
           return;
         }
-        setArtifactPreview({ loading: false, error: "", text, html: "" });
+        setArtifactPreview({ loading: false, error: "", text, html: "", spreadsheet: null });
         setArtifactDraft(text);
       })
       .catch((loadError) => {
         if (cancelled) return;
-        setArtifactPreview({ loading: false, error: loadError.message, text: "", html: "" });
+        setArtifactPreview({ loading: false, error: loadError.message, text: "", html: "", spreadsheet: null });
       });
     return () => {
       cancelled = true;
     };
-  }, [uiState.showArtifactModal, activeArtifact]);
+  }, [uiState.showArtifactModal, activeArtifactPreviewKey]);
 
   useEffect(() => {
     void loadMeta();
@@ -1072,7 +1329,7 @@ function App() {
       const normalizedSessions = sessions.map((session) => ({
         id: session.id,
         query: session.query || "",
-        state: session.state || cloneBaseState(),
+        state: mergeSessionState(cloneBaseState(), session.state),
         error: session.error || "",
       }));
       if (payload.thread_id) {
@@ -1087,10 +1344,11 @@ function App() {
           showArtifactModal: false,
         })
       );
+      setPendingUserFiles([]);
       if (normalizedSessions.length) {
         setHistory(normalizedSessions);
         const lastSession = normalizedSessions[normalizedSessions.length - 1];
-        setDemoState(lastSession.state || cloneBaseState());
+        setDemoState(normalizeSessionState(lastSession.state));
         setError(lastSession.error || "");
       }
     } catch {
@@ -1271,6 +1529,7 @@ function App() {
       setUiState((current) => normalizeUiState({ ...current, showHistoryModal: false }));
       return;
     }
+    await clearPendingUserFiles();
     try {
       const response = await fetch(`/api/demo/history?thread_id=${encodeURIComponent(nextThreadId)}`);
       const payload = await parseApiResponse(response);
@@ -1279,7 +1538,7 @@ function App() {
       const normalizedSessions = sessions.map((session) => ({
         id: session.id,
         query: session.query || "",
-        state: session.state || cloneBaseState(),
+        state: mergeSessionState(cloneBaseState(), session.state),
         error: session.error || "",
       }));
       setThreadId(payload.thread_id || nextThreadId);
@@ -1290,10 +1549,11 @@ function App() {
           showHistoryModal: false,
         })
       );
+      setPendingUserFiles([]);
       setHistory(normalizedSessions);
       if (normalizedSessions.length) {
         const lastSession = normalizedSessions[normalizedSessions.length - 1];
-        setDemoState(lastSession.state || cloneBaseState());
+        setDemoState(normalizeSessionState(lastSession.state));
         setError(lastSession.error || "");
       } else {
         setDemoState(cloneBaseState());
@@ -1351,9 +1611,165 @@ function App() {
     }
   }
 
+  function handleChooseUserFile() {
+    if (loading) return;
+    fileInputRef.current?.click();
+  }
+
+  function updatePendingUserFile(targetId, updater) {
+    setPendingUserFiles((current) =>
+      current.map((item) => (item.id === targetId ? { ...item, ...(typeof updater === "function" ? updater(item) : updater) } : item))
+    );
+  }
+
+  function uploadPendingUserFile(pendingFile) {
+    const request = new XMLHttpRequest();
+    const formData = new FormData();
+    formData.append("thread_id", threadId);
+    formData.append("user_file", pendingFile.file, pendingFile.name);
+    request.open("POST", "/api/demo/user-file");
+    request.responseType = "text";
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const progress = Math.max(1, Math.min(99, Math.round((event.loaded / event.total) * 100)));
+      updatePendingUserFile(pendingFile.id, { progress, status: "uploading" });
+    };
+    request.onerror = () => {
+      uploadControllersRef.current.delete(pendingFile.id);
+      updatePendingUserFile(pendingFile.id, { status: "error", progress: 0, error: "上传失败。" });
+    };
+    request.onabort = () => {
+      uploadControllersRef.current.delete(pendingFile.id);
+    };
+    request.onload = () => {
+      uploadControllersRef.current.delete(pendingFile.id);
+      try {
+        const payload = request.responseText ? JSON.parse(request.responseText) : {};
+        if (request.status < 200 || request.status >= 300) {
+          throw new Error(payload.error || "upload_failed");
+        }
+        const file = payload.file || {};
+        updatePendingUserFile(pendingFile.id, {
+          path: file.path || "",
+          preview_url: file.preview_url || "",
+          preview_json_url: file.preview_json_url || "",
+          download_url: file.download_url || "",
+          updated_at: file.updated_at || new Date().toISOString(),
+          mime_type: file.mime_type || pendingFile.mime_type,
+          extension: file.extension || pendingFile.extension,
+          size: file.size ?? pendingFile.size,
+          title: pendingFile.name,
+          original_name: pendingFile.name,
+          progress: 100,
+          status: "ready",
+          error: "",
+          file: pendingFile.file,
+        });
+      } catch (uploadError) {
+        updatePendingUserFile(pendingFile.id, {
+          status: "error",
+          progress: 0,
+          error: uploadError.message || "上传失败。",
+        });
+      }
+    };
+    uploadControllersRef.current.set(pendingFile.id, request);
+    request.send(formData);
+  }
+
+  function handlePendingFileChange(event) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length) return;
+    if (pendingUserFiles.length + files.length > MAX_USER_FILE_COUNT) {
+      setUploadError(`最多上传 ${MAX_USER_FILE_COUNT} 个文件。`);
+      return;
+    }
+
+    const nextFiles = [];
+    for (const file of files) {
+      const validationError = validatePendingUserFile(file);
+      if (validationError) {
+        setUploadError(validationError);
+        return;
+      }
+      nextFiles.push({ ...createPendingUserFile(file), status: "uploading", progress: 0, error: "" });
+    }
+    setUploadError("");
+    setPendingUserFiles((current) => [...current, ...nextFiles].slice(0, MAX_USER_FILE_COUNT));
+    for (const pendingFile of nextFiles) {
+      uploadPendingUserFile(pendingFile);
+    }
+  }
+
+  async function handleRemovePendingUserFile(targetId) {
+    const target = pendingUserFiles.find((item) => item.id === targetId);
+    const inflight = uploadControllersRef.current.get(targetId);
+    if (inflight) {
+      inflight.abort();
+      uploadControllersRef.current.delete(targetId);
+    }
+    if (target?.path) {
+      try {
+        await fetch(`/api/demo/user-file?path=${encodeURIComponent(target.path)}`, { method: "DELETE" });
+      } catch {}
+    }
+    setPendingUserFiles((current) => current.filter((item) => item.id !== targetId));
+    setUploadError("");
+  }
+
+  async function clearPendingUserFiles() {
+    const currentFiles = [...pendingUserFiles];
+    for (const item of currentFiles) {
+      const inflight = uploadControllersRef.current.get(item.id);
+      if (inflight) {
+        inflight.abort();
+        uploadControllersRef.current.delete(item.id);
+      }
+      if (item.path) {
+        try {
+          await fetch(`/api/demo/user-file?path=${encodeURIComponent(item.path)}`, { method: "DELETE" });
+        } catch {}
+      }
+    }
+    setPendingUserFiles([]);
+    setUploadError("");
+    setUploadProgress(0);
+  }
+
   async function handleRun() {
     const trimmed = uiState.query.trim();
-    if (!trimmed || loading) return;
+    if (loading) return;
+    if (!trimmed) {
+      if (pendingUserFiles.length) {
+        setUploadError("仅上传文件不能发送，请先输入问题。");
+      }
+      return;
+    }
+    if (pendingUserFiles.length > MAX_USER_FILE_COUNT) {
+      setUploadError(`最多上传 ${MAX_USER_FILE_COUNT} 个文件。`);
+      return;
+    }
+    for (const pendingFile of pendingUserFiles) {
+      if (pendingFile.file) {
+        const validationError = validatePendingUserFile(pendingFile.file);
+        if (validationError) {
+          setUploadError(validationError);
+          return;
+        }
+      } else if (!pendingFile.path) {
+        setUploadError("存在未完成上传的文件，请移除后重试。");
+        return;
+      }
+      if (pendingFile.status === "uploading") {
+        setUploadError("仍有文件上传中，请等待完成后再发送。");
+        return;
+      }
+      if (pendingFile.status === "error") {
+        setUploadError("存在上传失败的文件，请移除后重试。");
+        return;
+      }
+    }
 
     const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const messageHistory = history.flatMap((session) => {
@@ -1363,14 +1779,19 @@ function App() {
       }
       return items;
     });
-    const controller = new AbortController();
-    runControllerRef.current = controller;
+    const localUserFiles = pendingUserFiles.filter((item) => item.path).map((item) => ({
+      ...item,
+      original_name: item.original_name || item.name,
+    }));
     setLoading(true);
     setError("");
+    setUploadError("");
+    setUploadProgress(0);
     const nextState = {
       ...cloneBaseState(),
       agents: demoState.agents,
       query: trimmed,
+      user_files: localUserFiles,
       status: "running",
       scheduler_thought: "Supervisor 正在分析 query，准备建立本轮 Action List。",
     };
@@ -1385,9 +1806,12 @@ function App() {
       },
     ]);
     setUiState((current) => normalizeUiState({ ...current, query: DEFAULT_QUERY }));
+    setPendingUserFiles([]);
 
     try {
-      const response = await fetch("/api/demo/run", {
+      const controller = new AbortController();
+      runControllerRef.current = controller;
+        const response = await fetch("/api/demo/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
@@ -1396,6 +1820,11 @@ function App() {
           thread_id: threadId,
           session_id: sessionId,
           max_rounds: MAX_ROUNDS,
+          user_files: localUserFiles.map((item) => ({
+            path: item.path,
+            name: item.name,
+            original_name: item.original_name || item.name,
+          })),
           messages: [...messageHistory, { role: "user", content: trimmed }],
         }),
       });
@@ -1407,56 +1836,63 @@ function App() {
       const contentType = response.headers.get("content-type") || "";
       if (!response.body || !contentType.includes("application/x-ndjson")) {
         const payload = await response.json();
-        setDemoState(payload);
+        const nextPayload = mergeSessionState(nextState, payload);
+        setDemoState(nextPayload);
         setHistory((current) =>
-          current.map((item) => (item.id === sessionId ? { ...item, state: payload } : item))
+          current.map((item) => (item.id === sessionId ? { ...item, state: mergeSessionState(item.state, nextPayload) } : item))
         );
-        return;
-      }
+      } else {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          const trimmedLine = line.trim();
-          if (!trimmedLine) continue;
-          const event = JSON.parse(trimmedLine);
-          if (!event?.payload) continue;
-          setDemoState(event.payload);
-          setHistory((current) =>
-            current.map((item) =>
-              item.id === sessionId
-                ? { ...item, state: event.payload, error: event.type === "error" ? event.payload.stop_reason || "执行失败。" : "" }
-                : item
-            )
-          );
-          if (event.type === "error") {
-            setError(event.payload.stop_reason || "执行失败。");
+          for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (!trimmedLine) continue;
+            const event = JSON.parse(trimmedLine);
+            if (!event?.payload) continue;
+            const nextPayload = mergeSessionState(nextState, event.payload);
+            setDemoState(nextPayload);
+            setHistory((current) =>
+              current.map((item) =>
+                item.id === sessionId
+                  ? {
+                      ...item,
+                      state: mergeSessionState(item.state, nextPayload),
+                      error: event.type === "error" ? nextPayload.stop_reason || "执行失败。" : "",
+                    }
+                  : item
+              )
+            );
+            if (event.type === "error") {
+              setError(nextPayload.stop_reason || "执行失败。");
+            }
           }
         }
-      }
 
-      if (buffer.trim()) {
-        const event = JSON.parse(buffer.trim());
-        if (event?.payload) {
-          setDemoState(event.payload);
-          setHistory((current) =>
-            current.map((item) =>
-              item.id === sessionId
-                ? { ...item, state: event.payload, error: event.type === "error" ? event.payload.stop_reason || "执行失败。" : "" }
-                : item
-            )
-          );
-          if (event.type === "error") {
-            setError(event.payload.stop_reason || "执行失败。");
+        if (buffer.trim()) {
+          const event = JSON.parse(buffer.trim());
+          if (event?.payload) {
+            const nextPayload = mergeSessionState(nextState, event.payload);
+            setDemoState(nextPayload);
+            setHistory((current) =>
+              current.map((item) =>
+                item.id === sessionId
+                  ? {
+                      ...item,
+                      state: mergeSessionState(item.state, nextPayload),
+                      error: event.type === "error" ? nextPayload.stop_reason || "执行失败。" : "",
+                    }
+                  : item
+              )
+            );
           }
         }
       }
@@ -1474,11 +1910,18 @@ function App() {
         );
         return;
       }
-      setError("后端接口不可用，请先运行 `python3 serve_demo.py`。");
+      const message =
+        runError?.message === "query_required"
+          ? "请输入问题后再发送。"
+          : runError?.message === "network_error"
+            ? "后端接口不可用，请先运行 `python3 serve_demo.py`。"
+            : runError?.message || "后端接口不可用，请先运行 `python3 serve_demo.py`。";
+      setError(message);
       const failedState = {
         ...cloneBaseState(),
         agents: demoState.agents,
         query: trimmed,
+        user_files: localUserFiles,
         status: "stopped",
         scheduler_thought: "未能拿到后端调度结果。",
         final_summary: "当前没有执行结果返回。",
@@ -1486,7 +1929,7 @@ function App() {
       setDemoState(failedState);
       setHistory((current) =>
         current.map((item) =>
-          item.id === sessionId ? { ...item, state: failedState, error: "后端接口不可用，请先运行 `python3 serve_demo.py`。" } : item
+          item.id === sessionId ? { ...item, state: failedState, error: message } : item
         )
       );
       console.error(runError);
@@ -1511,6 +1954,7 @@ function App() {
       runControllerRef.current?.abort();
       runControllerRef.current = null;
     }
+    void clearPendingUserFiles();
     setLoading(false);
     setError("");
     setHistory([]);
@@ -1523,6 +1967,7 @@ function App() {
         promptDraft: current.promptDraft,
       })
     );
+    setPendingUserFiles([]);
     setDemoState((current) => ({
       ...cloneBaseState(),
       agents: current.agents,
@@ -1531,6 +1976,11 @@ function App() {
   }
 
   function handleOpenArtifact(file) {
+    artifactSelectionRef.current = {
+      path: file?.path || "",
+      originalName: file?.original_name || file?.name || "",
+      name: file?.name || "",
+    };
     setUiState((current) =>
       normalizeUiState({
         ...current,
@@ -1599,6 +2049,9 @@ function App() {
     if (demoState.status === "done") return { label: "已完成", icon: CheckCircle2, tone: "success" };
     return { label: "待命", icon: Circle, tone: "pending" };
   }, [demoState.status, error]);
+  const isEditableArtifact = Boolean(activeArtifact) &&
+    ["markdown", "text"].includes(classifyArtifact(activeArtifact)) &&
+    activeArtifact.source !== "user_upload";
 
   return html`<div className="app-shell">
     <aside className="side-rail">
@@ -1694,10 +2147,81 @@ function App() {
                   </button>
                 </div>
               </div>`
-            : html`<div className="composer-model-bubble">Model: ${modelName || "unknown"}</div>
+            : html`${pendingUserFiles.length
+                ? html`<div className="composer-pending-overlay">
+                    <div className="pending-upload-panel">
+                      <div className="pending-upload-header">
+                        <span>待上传文件</span>
+                        <span>${pendingUserFiles.length}/${MAX_USER_FILE_COUNT}</span>
+                      </div>
+                      <div className="pending-upload-grid">
+                        ${pendingUserFiles.map(
+                          (pendingFile) => html`<div key=${pendingFile.id} className="pending-upload-card is-compact">
+                            <div className="pending-upload-main">
+                              <div className="artifact-icon-wrap">
+                                <${iconForArtifact(pendingFile)} className="h-4 w-4" />
+                              </div>
+                              <div className="pending-upload-copy">
+                                <div className="pending-upload-title">${pendingFile.name}</div>
+                                <div className="pending-upload-meta">${formatFileSize(pendingFile.size)} · ${pendingFile.extension}</div>
+                              </div>
+                              <button
+                                type="button"
+                                className="icon-button"
+                                onClick=${() => handleRemovePendingUserFile(pendingFile.id)}
+                                aria-label="移除文件"
+                              >
+                                <${Trash2} className="h-4 w-4" />
+                              </button>
+                            </div>
+                            <div className=${`upload-progress-track ${pendingUploadTone(pendingFile.status)}`}>
+                              <span className="upload-progress-fill" style=${{ width: `${pendingFile.progress || 0}%` }}></span>
+                            </div>
+                            <div className="pending-upload-foot">
+                              <div className="pending-upload-meta">
+                                ${
+                                  pendingFile.status === "uploading"
+                                    ? "上传中"
+                                    : pendingFile.status === "error"
+                                      ? pendingFile.error || "上传失败"
+                                      : "已上传，待发送"
+                                }
+                              </div>
+                              ${
+                                pendingFile.status === "error"
+                                  ? null
+                                  : html`<div className="pending-upload-percent">${Math.max(0, Math.min(100, pendingFile.progress || 0))}%</div>`
+                              }
+                            </div>
+                          </div>`
+                        )}
+                      </div>
+                    </div>
+                  </div>`
+                : null}
+                <div className="composer-model-bubble">Model: ${modelName || "unknown"}</div>
                 <div className="composer-shell">
+                  <input
+                    ref=${fileInputRef}
+                    type="file"
+                    className="hidden-file-input"
+                    multiple=${true}
+                    accept=${ALLOWED_USER_FILE_EXTENSIONS.join(",")}
+                    onChange=${handlePendingFileChange}
+                  />
+                  <div className="composer-leading">
+                    <button
+                      type="button"
+                      onClick=${handleChooseUserFile}
+                      className="ghost-button upload-button"
+                      aria-label="添加文件"
+                      disabled=${loading}
+                    >
+                      <${Plus} className="h-4 w-4" />
+                    </button>
+                  </div>
                   <label className="composer-input-wrap" aria-label="User Query">
-                      <span className="composer-label">User Query</span>
+                    <span className="composer-label">User Query</span>
                     <textarea
                       value=${uiState.query}
                       onChange=${(event) => setUiState((current) => normalizeUiState({ ...current, query: event.target.value }))}
@@ -1705,6 +2229,7 @@ function App() {
                       className="composer-area"
                       placeholder="给 Supervisor 输入一个需要拆解并调度多 worker 的任务"
                     ></textarea>
+                    ${uploadError ? html`<div className="composer-inline-error">${uploadError}</div>` : null}
                   </label>
                   <div className="composer-actions composer-actions-minimal">
                     <button
@@ -1712,6 +2237,7 @@ function App() {
                       onClick=${handleRun}
                       className="primary-button send-button"
                       aria-label="发送"
+                      disabled=${loading || !uiState.query.trim() || pendingUserFiles.some((item) => item.status === "uploading")}
                     >
                       <${ArrowUp} className="h-4 w-4" />
                     </button>
@@ -1822,7 +2348,7 @@ function App() {
           ? html`<div className="stack-block file-preview-stack">
               <div className="prompt-meta-card">
                 <div>
-                  <div className="summary-title">${activeArtifact.title || activeArtifact.name}</div>
+                  <div className="summary-title">${activeArtifact.original_name || activeArtifact.name || activeArtifact.title}</div>
                   <div className="summary-subtitle">${formatUtc8Timestamp(activeArtifact.updated_at)}</div>
                 </div>
                 <span className="tag">${activeArtifact.extension || "(无后缀)"}</span>
@@ -1830,7 +2356,7 @@ function App() {
               <div className="prompt-toolbar">
                 <span className="prompt-toolbar-note">${formatFileSize(activeArtifact.size)} · ${activeArtifact.mime_type}</span>
                 <div className="prompt-toolbar-actions">
-                  ${["markdown", "text"].includes(classifyArtifact(activeArtifact))
+                  ${isEditableArtifact
                     ? html`<button type="button" className="secondary-button" onClick=${handleSaveArtifact} disabled=${artifactSaving}>
                         ${artifactSaving ? html`<${LoaderCircle} className="h-4 w-4 animate-spin" />` : null}
                         <span>${artifactSaving ? "保存中" : "保存修改"}</span>
@@ -1843,7 +2369,7 @@ function App() {
               </div>
               ${artifactSaveFeedback ? html`<div className=${artifactSaveFeedback.startsWith("保存失败") ? "alert-block" : "success-block"}>${artifactSaveFeedback}</div>` : null}
               ${
-                ["markdown", "text"].includes(classifyArtifact(activeArtifact))
+                isEditableArtifact
                   ? html`<div className="artifact-editor-grid">
                       <label className="form-field artifact-editor-pane">
                         <div className="form-label">编辑内容</div>

@@ -91,6 +91,7 @@ class PublishedFile:
     updated_at: str
     mime_type: str
     preview_url: str
+    preview_json_url: str
     download_url: str
 
 
@@ -670,6 +671,7 @@ class DemoRunCollector:
             "updated_at": file.updated_at,
             "mime_type": file.mime_type,
             "preview_url": file.preview_url,
+            "preview_json_url": file.preview_json_url,
             "download_url": file.download_url,
         }
 
@@ -687,6 +689,7 @@ class DemoRunCollector:
             updated_at=payload["updated_at"],
             mime_type=payload["mime_type"],
             preview_url=payload["preview_url"],
+            preview_json_url=payload["preview_json_url"],
             download_url=payload["download_url"],
         )
         self.files[published.path] = published
@@ -720,6 +723,7 @@ class DemoRunCollector:
                 updated_at=payload["updated_at"],
                 mime_type=payload["mime_type"],
                 preview_url=payload["preview_url"],
+                preview_json_url=payload["preview_json_url"],
                 download_url=payload["download_url"],
             )
             self.files[published.path] = published
@@ -853,13 +857,16 @@ def run_demo_session(
     query: str,
     max_rounds: int = 12,
     messages: list[dict[str, str]] | None = None,
+    user_files: list[dict[str, Any]] | None = None,
+    agent_query: str | None = None,
 ) -> dict[str, Any]:
     os.makedirs(os.path.dirname(settings.log_file) or ".", exist_ok=True)
-    agent, runtime_catalog = build_agent_bundle(settings=settings, query=query)
+    effective_query = (agent_query or query).strip()
+    agent, runtime_catalog = build_agent_bundle(settings=settings, query=effective_query)
     collector = DemoRunCollector(log_file=settings.log_file, runtime_catalog=runtime_catalog)
     collector.status = "running"
     collector.log_session_start(query=query, max_rounds=max_rounds, model=settings.model, mode="sync")
-    message_payload = messages or [{"role": "user", "content": query}]
+    message_payload = messages or [{"role": "user", "content": effective_query}]
     try:
         for chunk in agent.stream(
             {"messages": message_payload},
@@ -871,6 +878,7 @@ def run_demo_session(
             if len(collector.rounds) >= max_rounds:
                 break
         payload = collector.build_payload(query=query, max_rounds=max_rounds)
+        payload["user_files"] = _sanitize_user_files_payload(user_files)
         collector.log_session_finish(payload=payload, event_type="done")
         return payload
     finally:
@@ -882,6 +890,8 @@ def run_demo_session_stream(
     query: str,
     max_rounds: int = 12,
     messages: list[dict[str, str]] | None = None,
+    user_files: list[dict[str, Any]] | None = None,
+    agent_query: str | None = None,
 ):
     os.makedirs(os.path.dirname(settings.log_file) or ".", exist_ok=True)
     collector = DemoRunCollector(log_file=settings.log_file, runtime_catalog=[])
@@ -889,10 +899,13 @@ def run_demo_session_stream(
     collector.log_session_start(query=query, max_rounds=max_rounds, model=settings.model, mode="stream")
     collector._push_log("scheduler", "正在准备执行环境，构建 supervisor、worker 名册与运行时工具。")
     last_signature = ""
-    message_payload = messages or [{"role": "user", "content": query}]
+    effective_query = (agent_query or query).strip()
+    message_payload = messages or [{"role": "user", "content": effective_query}]
+    normalized_user_files = _sanitize_user_files_payload(user_files)
 
     def emit(payload: dict[str, Any], event_type: str) -> dict[str, Any] | None:
         nonlocal last_signature
+        payload = {**payload, "user_files": normalized_user_files}
         signature = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         if event_type == "snapshot" and signature == last_signature:
             return None
@@ -918,7 +931,7 @@ def run_demo_session_stream(
                 yield bootstrap_event
             time.sleep(random.uniform(1.0, 2.0))
 
-        agent, runtime_catalog = build_agent_bundle(settings=settings, query=query)
+        agent, runtime_catalog = build_agent_bundle(settings=settings, query=effective_query)
         collector.runtime_catalog = list(runtime_catalog)
         collector.runtime_catalog_by_id = {item["id"]: item for item in runtime_catalog}
         collector._push_log("scheduler", "执行环境准备完成，开始进入 agent 流式执行阶段。")
@@ -1051,7 +1064,19 @@ def _parse_published_file_from_tool_output(content: Any) -> dict[str, Any] | Non
     file_payload = payload.get("file")
     if not isinstance(file_payload, dict):
         return None
-    required_fields = ("id", "path", "name", "title", "extension", "size", "updated_at", "mime_type", "preview_url", "download_url")
+    required_fields = (
+        "id",
+        "path",
+        "name",
+        "title",
+        "extension",
+        "size",
+        "updated_at",
+        "mime_type",
+        "preview_url",
+        "preview_json_url",
+        "download_url",
+    )
     if any(field not in file_payload for field in required_fields):
         return None
     return {
@@ -1064,8 +1089,36 @@ def _parse_published_file_from_tool_output(content: Any) -> dict[str, Any] | Non
         "updated_at": str(file_payload["updated_at"]),
         "mime_type": str(file_payload["mime_type"]),
         "preview_url": str(file_payload["preview_url"]),
+        "preview_json_url": str(file_payload["preview_json_url"]),
         "download_url": str(file_payload["download_url"]),
     }
+
+
+def _sanitize_user_files_payload(user_files: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    if not user_files:
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in user_files:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "id": str(item.get("id", "")),
+                "path": str(item.get("path", "")),
+                "name": str(item.get("name", "")),
+                "title": str(item.get("title", "")),
+                "extension": str(item.get("extension", "")),
+                "size": int(item.get("size", 0) or 0),
+                "updated_at": str(item.get("updated_at", "")),
+                "mime_type": str(item.get("mime_type", "")),
+                "preview_url": str(item.get("preview_url", "")),
+                "preview_json_url": str(item.get("preview_json_url", "")),
+                "download_url": str(item.get("download_url", "")),
+                "original_name": str(item.get("original_name", item.get("name", ""))),
+                "source": "user_upload",
+            }
+        )
+    return normalized
 
 
 def _extract_workspace_paths(text: str) -> list[str]:
