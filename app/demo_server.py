@@ -26,6 +26,13 @@ from app.chat_history_store import (
 from app.config import load_settings
 from app.demo_session import run_demo_session_stream
 from app.prompts import get_prompt_sections, reset_prompt_section, update_prompt_section
+from app.tool_registry import (
+    get_tool_control,
+    list_active_tool_ids,
+    list_active_worker_tool_ids,
+    list_tool_controls,
+    update_tool_enabled,
+)
 from app.workspace_files import WORKSPACE_ROOT, build_workspace_file_card, resolve_workspace_file, write_workspace_text_file
 
 
@@ -48,6 +55,9 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/demo/prompts/reset":
             self._handle_reset_prompt()
+            return
+        if self.path == "/api/demo/tools/toggle":
+            self._handle_toggle_tool()
             return
         if self.path == "/api/demo/thread-state":
             self._handle_update_thread_state()
@@ -114,7 +124,7 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        agent_query = _compose_agent_query(query, user_files)
+        agent_query = _compose_agent_query(query, user_files, list_active_worker_tool_ids())
         if messages:
             patched_messages = messages[:-1]
             last_message = messages[-1]
@@ -214,6 +224,32 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
         settings = load_settings(argv=[])
         upsert_thread_ui_state(settings=settings, thread_id=thread_id, ui_state=ui_state)
         self._send_json({"ok": True})
+
+    def _handle_toggle_tool(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length) if content_length else b"{}"
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._send_json({"error": "invalid_json"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        tool_id = str(payload.get("id", "")).strip()
+        enabled = payload.get("enabled")
+        if not tool_id:
+            self._send_json({"error": "tool_id_required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not isinstance(enabled, bool):
+            self._send_json({"error": "enabled_must_be_boolean"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            tool_payload = update_tool_enabled(tool_id=tool_id, enabled=enabled)
+        except (KeyError, ValueError) as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        self._send_json({"ok": True, "tool": tool_payload, "tools": list_tool_controls()}, status=HTTPStatus.OK)
 
     def _handle_update_workspace_file(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -321,6 +357,20 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
             settings = load_settings(argv=[])
             self._send_json({"prompts": get_prompt_sections(max_rounds=12), "model": settings.model})
             return
+        if parsed.path == "/api/demo/tools":
+            params = parse_qs(parsed.query)
+            tool_id = (params.get("id") or [""])[0].strip()
+            try:
+                payload = (
+                    {"tool": get_tool_control(tool_id), "activate_tool_list": list_active_tool_ids()}
+                    if tool_id
+                    else {"tools": list_tool_controls(), "activate_tool_list": list_active_tool_ids()}
+                )
+            except KeyError as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json(payload, status=HTTPStatus.OK)
+            return
         if parsed.path == "/api/demo/history":
             settings = load_settings(argv=[])
             params = parse_qs(parsed.query)
@@ -384,8 +434,8 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
         if not relative_path:
             self._send_json({"error": "path_required"}, status=HTTPStatus.BAD_REQUEST)
             return
-        if not relative_path.startswith("user_file/"):
-            self._send_json({"error": "只能删除 user_file 下的文件。"}, status=HTTPStatus.BAD_REQUEST)
+        if "/" in relative_path or "\\" in relative_path or "__pending__" not in relative_path:
+            self._send_json({"error": "只能删除当前待发送的上传文件。"}, status=HTTPStatus.BAD_REQUEST)
             return
         try:
             file_path = resolve_workspace_file(relative_path)
@@ -577,7 +627,7 @@ def _save_uploaded_user_file(uploaded_file: dict[str, object], thread_id: str, *
         raise ValueError(f"文件不能超过 {MAX_USER_FILE_SIZE} bytes。")
 
     stored_name = _build_user_file_name(filename, thread_id, finalized=finalized)
-    relative_path = f"user_file/{stored_name}"
+    relative_path = stored_name
     file_path = (WORKSPACE_ROOT / relative_path).resolve()
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_bytes(content)
@@ -604,15 +654,15 @@ def _normalize_user_file_refs(raw_user_files: object, thread_id: str) -> list[di
         relative_path = str(item.get("path", "")).strip()
         if not relative_path:
             continue
-        if not relative_path.startswith("user_file/"):
-            raise ValueError("用户文件路径必须位于 user_file/ 下。")
+        if "/" in relative_path or "\\" in relative_path:
+            raise ValueError("用户文件路径必须是 workspace 根目录下的相对文件名。")
         original_name = str(item.get("original_name") or item.get("name") or "").strip()
         file_path = resolve_workspace_file(relative_path)
         target_name = _build_user_file_name(original_name or file_path.name, thread_id, finalized=True)
         if "__pending__" in file_path.name and file_path.name != target_name:
             target_path = file_path.with_name(target_name)
             file_path.rename(target_path)
-            relative_path = f"user_file/{target_name}"
+            relative_path = target_name
         file_payload = build_workspace_file_card(relative_path, title=original_name or file_path.name)
         if safe_thread_id not in str(file_payload.get("name", "")):
             raise ValueError("用户文件与当前线程不匹配。")
@@ -622,9 +672,20 @@ def _normalize_user_file_refs(raw_user_files: object, thread_id: str) -> list[di
     return normalized
 
 
-def _compose_agent_query(query: str, user_files: list[dict[str, object]]) -> str:
+def _compose_agent_query(
+    query: str,
+    user_files: list[dict[str, object]],
+    active_tool_list: list[str],
+) -> str:
+    tool_lines = [
+        f"active_tool_list（worker/subagent 可见工具）: {', '.join(active_tool_list) if active_tool_list else '(empty)'}",
+        "注意：active_tool_list 表示 worker/subagent 可见的项目扩展工具，不代表 supervisor 当前可以直接调用这些工具。",
+        "supervisor 只能直接调用当前运行时 tool schema 中显示的 supervisor 工具；如果任务需要 active_tool_list 中的 worker 工具，应通过 generate_subagents 和 task 派发给 worker 使用。",
+        "如果用户当前请求明确依赖某个项目扩展工具，但该工具不在 active_tool_list 中，说明它已在工具控制台被禁用。",
+        "这时你不要继续后续执行流程，也不要假设该工具仍可用，必须直接提醒用户去工具控制台检查并启用对应工具。",
+    ]
     if not user_files:
-        return query
+        return f"{query}\n\n" + "\n".join(tool_lines)
 
     file_lines = []
     for file in user_files:
@@ -637,7 +698,10 @@ def _compose_agent_query(query: str, user_files: list[dict[str, object]]) -> str
         )
     return (
         f"{query}\n\n"
-        "用户本轮还上传了以下文件。路径相对于当前 workspace 根目录，可直接读取：\n"
+        f"{chr(10).join(tool_lines)}\n\n"
+        "用户本轮还上传了以下文件。下面给出的路径已经是位于当前 workspace 根目录的相对文件名，可直接用于文件工具。\n"
+        "如果你在 execute 中运行本地脚本或访问本地文件，也必须继续使用这些相对路径，例如 `python3 foo.py`。\n"
+        "禁止把它们改写成带 `/` 开头的绝对路径，也不要手动补任何目录前缀。\n"
         f"{chr(10).join(file_lines)}"
     )
 

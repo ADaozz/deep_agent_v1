@@ -3,9 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import os
-import random
 import re
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -929,7 +927,6 @@ def run_demo_session_stream(
             bootstrap_event = emit(bootstrap_payload, "snapshot")
             if bootstrap_event:
                 yield bootstrap_event
-            time.sleep(random.uniform(1.0, 2.0))
 
         agent, runtime_catalog = build_agent_bundle(settings=settings, query=effective_query)
         collector.runtime_catalog = list(runtime_catalog)
@@ -955,6 +952,20 @@ def run_demo_session_stream(
             if len(collector.rounds) >= max_rounds:
                 break
     except Exception as exc:  # noqa: BLE001
+        fallback_summary = _build_fallback_summary_from_worker_reports(collector, exc)
+        if fallback_summary:
+            collector.main_text = [fallback_summary]
+            collector._push_log("scheduler", "模型连接在最终收敛阶段中断，已基于已完成 worker report 生成降级汇总。")
+            fallback_payload = collector.build_payload(query=query, max_rounds=max_rounds, final=True)
+            fallback_payload = {
+                **fallback_payload,
+                "status": "done",
+                "stop_reason": "模型连接在最终收敛阶段中断，已基于已完成 worker report 生成降级汇总。",
+                "final_summary": fallback_summary,
+            }
+            collector.log_session_finish(payload=fallback_payload, event_type="done")
+            yield {"type": "done", "payload": fallback_payload}
+            return
         error_payload = collector.build_payload(query=query, max_rounds=max_rounds, final=True, error=str(exc))
         collector.log_session_finish(payload=error_payload, event_type="error")
         yield {"type": "error", "payload": error_payload}
@@ -964,6 +975,83 @@ def run_demo_session_stream(
         yield {"type": "done", "payload": final_payload}
     finally:
         collector.close()
+
+
+def _build_fallback_summary_from_worker_reports(collector: DemoRunCollector, exc: Exception) -> str:
+    if not _is_connection_error(exc):
+        return ""
+
+    completed_agents = [
+        (agent_id, panel)
+        for agent_id, panel in collector.agents.items()
+        if panel.status == "done" and panel.report.strip()
+    ]
+    if not completed_agents:
+        return ""
+
+    chunks = [
+        "模型连接在最终收敛阶段中断，以下为已完成 worker 的降级汇总。",
+        "",
+        "说明：本结果未经过 supervisor 的最终综合推理，只汇总已经完成并回报的 worker 结果，避免重复派发任务或重复调用外部工具。",
+        "",
+        "## Worker 结果",
+    ]
+    for _agent_id, panel in completed_agents:
+        chunks.extend(
+            [
+                "",
+                f"### {panel.name}",
+                "",
+                f"- 职责：{panel.role or '未定义'}",
+                f"- 状态：{_status_label(panel.status)}",
+                f"- 当前任务：{panel.current_task_title or '未记录'}",
+                "",
+                panel.report.strip(),
+            ]
+        )
+
+    if collector.rounds and collector.rounds[-1].conclusion:
+        chunks.extend(["", "## 已完成轮次", "", collector.rounds[-1].conclusion])
+
+    chunks.extend(
+        [
+            "",
+            "## 降级原因",
+            "",
+            f"最终汇总阶段连接中断：{str(exc).strip() or type(exc).__name__}",
+        ]
+    )
+    return "\n".join(chunks).strip()
+
+
+def _is_connection_error(exc: Exception) -> bool:
+    message = str(exc).strip().lower()
+    exc_name = type(exc).__name__.lower()
+    markers = (
+        "connection error",
+        "connectionerror",
+        "apiconnectionerror",
+        "remoteprotocolerror",
+        "readtimeout",
+        "read timeout",
+        "connection reset",
+        "connection aborted",
+        "server disconnected",
+        "peer closed connection",
+    )
+    return any(marker in message or marker in exc_name for marker in markers)
+
+
+def _status_label(status: str) -> str:
+    if status == "done":
+        return "已完成"
+    if status == "blocked":
+        return "已阻塞"
+    if status == "error":
+        return "失败"
+    if status == "running":
+        return "进行中"
+    return status or "未知"
 
 
 def _parse_todos_from_tool_output(content: Any) -> list[dict[str, str]]:

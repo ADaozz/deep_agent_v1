@@ -30,6 +30,7 @@ def make_generate_subagents_tool(
             {
                 "id": item["id"],
                 "name": item["name"],
+                "scope": item.get("scope", ""),
                 "role": item["role"],
                 "description": item["description"],
             }
@@ -42,14 +43,20 @@ def make_generate_subagents_tool(
     def generate_subagents(task_breakdown: str = "") -> str:
         """根据当前 query 返回本轮 worker 名册。
 
-        这是 supervisor 专用工具。正常顺序应当是：
-        1. 先调用 write_todos 拆解主任务
-        2. 再调用 generate_subagents 获取本轮 worker 名册
-        3. 最后基于返回结果调用 task，把叶子任务派发给对应 worker
+        何时使用：
+        - 仅 supervisor 使用。
+        - 已经完成主 Action List，且判断当前任务不适合由 supervisor 独立完成。
+        - 需要确认本轮可以派发给哪些 worker。
 
-        `task_breakdown` 用于向工具说明当前已拆解出的原子任务，有助于你在
-        推理时核对本轮 worker 是否覆盖了这些维度。工具返回 JSON，其中
-        `workers[*].id` 就是后续 `task.subagent_type` 必须使用的值。
+        使用规则：
+        - 在首次调用 task 之前必须先调用本工具。
+        - 不要猜测、编造或复用历史 worker 名称。
+        - 工具返回 JSON，其中 workers[*].id 是后续 task.subagent_type 唯一允许使用的值。
+        - workers[*].scope 描述该 worker 的对象、维度或边界，派发任务时必须遵守。
+        - 如果 workers 为空，说明本轮没有可派发 worker，应由 supervisor 继续处理或向用户说明限制。
+
+        输入：
+        - `task_breakdown`：当前已拆解出的任务列表或简要分片说明，用于核对 worker 覆盖范围。
         """
         payload = dict(roster_payload)
         payload["task_breakdown"] = task_breakdown.strip()

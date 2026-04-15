@@ -21,6 +21,7 @@ import {
   LoaderCircle,
   MessageSquare,
   MonitorCog,
+  SlidersHorizontal,
   ShieldAlert,
   Sparkles,
   Square,
@@ -70,8 +71,10 @@ const DEFAULT_UI_STATE = {
   query: DEFAULT_QUERY,
   showPromptModal: false,
   showHistoryModal: false,
+  showToolModal: false,
   showArtifactModal: false,
   activePromptId: "",
+  activeToolId: "",
   promptDraft: "",
   selectedAgentId: "",
   activeArtifactPath: "",
@@ -106,6 +109,12 @@ function normalizeUiState(snapshot = {}) {
         : typeof snapshot.show_history_modal === "boolean"
           ? snapshot.show_history_modal
           : DEFAULT_UI_STATE.showHistoryModal,
+    showToolModal:
+      typeof snapshot.showToolModal === "boolean"
+        ? snapshot.showToolModal
+        : typeof snapshot.show_tool_modal === "boolean"
+          ? snapshot.show_tool_modal
+          : DEFAULT_UI_STATE.showToolModal,
     showArtifactModal:
       typeof snapshot.showArtifactModal === "boolean"
         ? snapshot.showArtifactModal
@@ -118,6 +127,12 @@ function normalizeUiState(snapshot = {}) {
         : typeof snapshot.active_prompt_id === "string"
           ? snapshot.active_prompt_id
           : DEFAULT_UI_STATE.activePromptId,
+    activeToolId:
+      typeof snapshot.activeToolId === "string"
+        ? snapshot.activeToolId
+        : typeof snapshot.active_tool_id === "string"
+          ? snapshot.active_tool_id
+          : DEFAULT_UI_STATE.activeToolId,
     promptDraft:
       typeof snapshot.promptDraft === "string"
         ? snapshot.promptDraft
@@ -146,8 +161,10 @@ function buildUiStateSnapshot(uiState) {
     query: normalized.query,
     showPromptModal: false,
     showHistoryModal: false,
+    showToolModal: false,
     showArtifactModal: false,
     activePromptId: normalized.activePromptId,
+    activeToolId: normalized.activeToolId,
     promptDraft: normalized.promptDraft,
     selectedAgentId: normalized.selectedAgentId,
     activeArtifactPath: normalized.activeArtifactPath,
@@ -177,7 +194,7 @@ function normalizeSessionState(snapshot = {}) {
     ...(snapshot || {}),
     tasks: Array.isArray(snapshot?.tasks) ? snapshot.tasks : [],
     rounds: Array.isArray(snapshot?.rounds) ? snapshot.rounds : [],
-    agents: Array.isArray(snapshot?.agents) ? snapshot.agents : [],
+    agents: Array.isArray(snapshot?.agents) ? snapshot.agents.map((agent) => normalizeAgent(agent)) : [],
     files: Array.isArray(snapshot?.files) ? snapshot.files : [],
     user_files: Array.isArray(snapshot?.user_files) ? snapshot.user_files : [],
     logs: Array.isArray(snapshot?.logs) ? snapshot.logs : [],
@@ -396,11 +413,15 @@ function iconForArtifact(file) {
 }
 
 function normalizeAgent(agent, existing = {}) {
+  const role = agent.role || existing.role || "";
+  const description = agent.description || existing.description || "";
+  const scope = agent.scope || existing.scope || role || description || "";
   return {
     id: agent.id,
     name: agent.name || existing.name || agent.id,
-    role: agent.role || existing.role || "",
-    description: agent.description || existing.description || "",
+    scope,
+    role,
+    description,
     status: agent.status || existing.status || "idle",
     current_task_title: agent.current_task_title || existing.current_task_title || "",
     report: agent.report || existing.report || "",
@@ -631,7 +652,7 @@ function WorkerList({ agents, onOpen }) {
           </div>
         </summary>
         <div className="disclosure-body">
-          <div className="detail-grid">
+          <div className="detail-grid worker-metric-grid">
             <div className="metric-card">
               <span className="metric-label">Checklist</span>
               <span className="metric-value">${todoCountText}</span>
@@ -639,6 +660,10 @@ function WorkerList({ agents, onOpen }) {
             <div className="metric-card">
               <span className="metric-label">Runtime guard</span>
               <span className="metric-value">${guardText}</span>
+            </div>
+            <div className="metric-card">
+              <span className="metric-label">Scope</span>
+              <span className="metric-value">${agent.scope || agent.role || agent.description || "未定义边界"}</span>
             </div>
           </div>
           <div className=${reportClass}>${agent.report || "本轮尚未汇报。"}</div>
@@ -969,6 +994,7 @@ function SessionTranscript({ session, error, onOpenAgent, onOpenFile }) {
   const state = session.state;
   const userFiles = Array.isArray(state.user_files) ? state.user_files : [];
   const completedCount = state.tasks.filter((task) => stepState(task.status) === "success").length;
+  const isSupervisorOnlyRun = state.tasks.length > 0 && state.agents.length === 0;
   const isErrorSession = Boolean(error) || state.status === "stopped";
   const errorText = error || (state.status === "stopped" ? state.stop_reason : "");
   const hasWorkerActivity = state.agents.some(
@@ -995,7 +1021,16 @@ function SessionTranscript({ session, error, onOpenAgent, onOpenFile }) {
     ${
       showTaskBubble
         ? html`<${ChatBubble} title="Action List" eyebrow="Execution" icon=${ClipboardList}>
-            <${SectionTitle} icon=${ClipboardList} title="任务追踪" meta=${`${completedCount}/${state.tasks.length || 0} completed`} />
+            <${SectionTitle}
+              icon=${ClipboardList}
+              title=${isSupervisorOnlyRun ? "任务追踪 / Supervisor Checklist" : "任务追踪"}
+              meta=${`${completedCount}/${state.tasks.length || 0} completed`}
+            />
+            ${
+              isSupervisorOnlyRun
+                ? html`<div className="note-block">当前判断为可独立完成任务，本轮由 Supervisor 直接执行；这里的 Action List 就是 Supervisor 的执行 checklist。</div>`
+                : null
+            }
             <${TaskList} tasks=${state.tasks} />
           </${ChatBubble}>`
         : null
@@ -1245,6 +1280,113 @@ function HistoryCenter({
   </div>`;
 }
 
+function ToolCenter({
+  tools,
+  activeToolId,
+  onSelect,
+  onToggle,
+  togglingToolId,
+  loading,
+  error,
+  saveFeedback,
+  saveFeedbackTone,
+}) {
+  const activeTool = tools.find((item) => item.id === activeToolId) || tools[0] || null;
+
+  return html`<div className="prompt-browser">
+    <div className="prompt-nav">
+      ${
+        tools.length
+          ? tools.map(
+              (tool) => html`<div
+                key=${tool.id}
+                className=${`tool-nav-card ${tool.id === (activeTool?.id || "") ? "is-active" : ""}`}
+              >
+                <button type="button" className="tool-nav-main" onClick=${() => onSelect(tool.id)}>
+                  <div className="tool-nav-head">
+                    <div>
+                      <div className="prompt-nav-title">${tool.title}</div>
+                      <div className="prompt-nav-subtitle">${tool.subtitle}</div>
+                    </div>
+                    <span className="tag">${tool.scope}</span>
+                  </div>
+                </button>
+                <div className="tool-nav-actions">
+                  ${tool.switchable
+                    ? html`<button
+                        type="button"
+                        className=${`tool-switch ${tool.enabled ? "is-on" : "is-off"}`}
+                        onClick=${() => onToggle(tool.id, !tool.enabled)}
+                        disabled=${togglingToolId === tool.id}
+                        aria-pressed=${tool.enabled}
+                      >
+                        <span className="tool-switch-track">
+                          <span className="tool-switch-thumb"></span>
+                        </span>
+                        <span>${togglingToolId === tool.id ? "切换中" : tool.enabled ? "已启用" : "已关闭"}</span>
+                      </button>`
+                    : html`<span className="tag">固定工具</span>`}
+                </div>
+              </div>`
+            )
+          : html`<div className="empty-block">当前没有可展示的扩展工具。</div>`
+      }
+    </div>
+    <div className="prompt-content tool-content">
+      ${
+        loading
+          ? html`<div className="empty-block">
+              <span className="loading-inline">
+                <${LoaderCircle} className="h-4 w-4 animate-spin" />
+                <span>正在加载工具定义...</span>
+              </span>
+            </div>`
+          : error
+            ? html`<div className="alert-block">${error}</div>`
+            : activeTool
+              ? html`<div className="stack-block prompt-stack tool-stack">
+                  <div className="prompt-meta-card">
+                    <div>
+                      <div className="summary-title">${activeTool.title}</div>
+                      <div className="summary-subtitle">${activeTool.subtitle}</div>
+                    </div>
+                    <span className="tag">${activeTool.switchable ? activeTool.enabled ? "enabled" : "disabled" : "pinned"}</span>
+                  </div>
+                  <div className="detail-grid">
+                    <div className="info-card">
+                      <div className="info-label">作用域</div>
+                      <div className="info-value">${activeTool.scope}</div>
+                    </div>
+                    <div className="info-card">
+                      <div className="info-label">入口函数</div>
+                      <div className="info-value">${activeTool.function_name}</div>
+                    </div>
+                    <div className="info-card wide">
+                      <div className="info-label">源码位置</div>
+                      <div className="info-value">${activeTool.source_path}</div>
+                    </div>
+                    <div className="info-card wide">
+                      <div className="info-label">摘要</div>
+                      <div className="info-value">${activeTool.summary}</div>
+                    </div>
+                    <div className="info-card wide">
+                      <div className="info-label">Docstring</div>
+                      <div className="info-value preserve-lines tool-docstring">${activeTool.docstring || "该工具未提供 docstring。"}</div>
+                    </div>
+                  </div>
+                  <div className="prompt-toolbar">
+                    <span className="prompt-toolbar-note">
+                      固定工具置顶展示且不可关闭；自定义工具来自 app/tools/custom_tools.py 中被 @tool 修饰的函数。
+                    </span>
+                  </div>
+                  ${saveFeedback ? html`<div className=${saveFeedbackTone === "success" ? "success-block" : "alert-block"}>${saveFeedback}</div>` : null}
+                </div>`
+              : html`<div className="empty-block">请选择左侧的工具查看详情。</div>`
+      }
+    </div>
+  </div>`;
+}
+
 function ThemeSwitcher({ theme, setTheme }) {
   return html`<div className="theme-switcher">
     ${THEMES.map((item) => {
@@ -1290,6 +1432,12 @@ function App() {
   const [promptResetting, setPromptResetting] = useState(false);
   const [promptSaveFeedback, setPromptSaveFeedback] = useState("");
   const [promptSaveFeedbackTone, setPromptSaveFeedbackTone] = useState("");
+  const [toolSections, setToolSections] = useState([]);
+  const [toolLoading, setToolLoading] = useState(false);
+  const [toolError, setToolError] = useState("");
+  const [toolTogglingId, setToolTogglingId] = useState("");
+  const [toolSaveFeedback, setToolSaveFeedback] = useState("");
+  const [toolSaveFeedbackTone, setToolSaveFeedbackTone] = useState("");
   const [historyThreads, setHistoryThreads] = useState([]);
   const [historyThreadsLoading, setHistoryThreadsLoading] = useState(false);
   const [historyThreadsError, setHistoryThreadsError] = useState("");
@@ -1488,6 +1636,7 @@ function App() {
           ...(payload.ui_state || {}),
           showPromptModal: false,
           showHistoryModal: false,
+          showToolModal: false,
           showArtifactModal: false,
         })
       );
@@ -1543,12 +1692,44 @@ function App() {
     }
   }
 
+  async function loadTools() {
+    setToolLoading(true);
+    setToolError("");
+    try {
+      const response = await fetch("/api/demo/tools");
+      const payload = await parseApiResponse(response);
+      if (!response.ok) throw new Error(payload.error || "tool_load_failed");
+      const tools = Array.isArray(payload.tools) ? payload.tools : [];
+      setToolSections(tools);
+      setUiState((current) => {
+        const nextId = current.activeToolId || tools[0]?.id || "";
+        return normalizeUiState({
+          ...current,
+          activeToolId: nextId,
+        });
+      });
+    } catch (loadError) {
+      setToolError(`加载工具列表失败: ${loadError.message}`);
+    } finally {
+      setToolLoading(false);
+    }
+  }
+
   function openPromptCenter() {
     setUiState((current) => normalizeUiState({ ...current, showPromptModal: true }));
     setPromptSaveFeedback("");
     setPromptSaveFeedbackTone("");
     if (!promptSections.length && !promptLoading) {
       void loadPrompts();
+    }
+  }
+
+  function openToolCenter() {
+    setUiState((current) => normalizeUiState({ ...current, showToolModal: true }));
+    setToolSaveFeedback("");
+    setToolSaveFeedbackTone("");
+    if (!toolSections.length && !toolLoading) {
+      void loadTools();
     }
   }
 
@@ -1569,6 +1750,15 @@ function App() {
   }, [promptSaveFeedback, promptSaveFeedbackTone]);
 
   useEffect(() => {
+    if (toolSaveFeedbackTone !== "success" || !toolSaveFeedback) return undefined;
+    const timer = window.setTimeout(() => {
+      setToolSaveFeedback("");
+      setToolSaveFeedbackTone("");
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [toolSaveFeedback, toolSaveFeedbackTone]);
+
+  useEffect(() => {
     if (!promptSections.length) return;
     const activePrompt = promptSections.find((item) => item.id === uiState.activePromptId) || promptSections[0] || null;
     if (!activePrompt) return;
@@ -1586,6 +1776,20 @@ function App() {
       });
     });
   }, [promptSections, uiState.activePromptId]);
+
+  useEffect(() => {
+    if (!toolSections.length) return;
+    const activeTool = toolSections.find((item) => item.id === uiState.activeToolId) || toolSections[0] || null;
+    if (!activeTool) return;
+    setUiState((current) => {
+      const nextId = activeTool.id;
+      if (current.activeToolId === nextId) return current;
+      return normalizeUiState({
+        ...current,
+        activeToolId: nextId,
+      });
+    });
+  }, [toolSections, uiState.activeToolId]);
 
   useEffect(() => {
     if (!threadId) return undefined;
@@ -1671,6 +1875,31 @@ function App() {
     }
   }
 
+  async function handleToggleTool(toolId, enabled) {
+    if (!toolId || toolTogglingId) return;
+    setToolTogglingId(toolId);
+    setToolSaveFeedback("");
+    setToolSaveFeedbackTone("");
+    try {
+      const response = await fetch("/api/demo/tools/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: toolId, enabled }),
+      });
+      const payload = await parseApiResponse(response);
+      if (!response.ok) throw new Error(payload.error || "tool_toggle_failed");
+      const tools = Array.isArray(payload.tools) ? payload.tools : [];
+      setToolSections(tools);
+      setToolSaveFeedback(enabled ? "工具已启用，后续新建的 agent 可见。" : "工具已关闭，后续新建的 agent 将不可见。");
+      setToolSaveFeedbackTone("success");
+    } catch (toggleError) {
+      setToolSaveFeedback(`切换失败: ${toggleError.message}`);
+      setToolSaveFeedbackTone("error");
+    } finally {
+      setToolTogglingId("");
+    }
+  }
+
   async function handleSelectThread(nextThreadId) {
     if (!nextThreadId || nextThreadId === threadId) {
       setUiState((current) => normalizeUiState({ ...current, showHistoryModal: false }));
@@ -1753,6 +1982,7 @@ function App() {
           ...DEFAULT_UI_STATE,
           theme: current.theme,
           activePromptId: current.activePromptId,
+          activeToolId: current.activeToolId,
           promptDraft: current.promptDraft,
           showHistoryModal: false,
         })
@@ -2148,6 +2378,7 @@ function App() {
         ...DEFAULT_UI_STATE,
         theme: current.theme,
         activePromptId: current.activePromptId,
+        activeToolId: current.activeToolId,
         promptDraft: current.promptDraft,
       })
     );
@@ -2257,6 +2488,15 @@ function App() {
         >
           <${BookText} className="h-4 w-4" />
           <span>提示词</span>
+        </button>
+        <button
+          type="button"
+          className=${`side-menu-button ${uiState.showToolModal ? "is-active" : ""}`}
+          onClick=${openToolCenter}
+          title="管理项目扩展工具"
+        >
+          <${SlidersHorizontal} className="h-4 w-4" />
+          <span>工具</span>
         </button>
       </div>
     </aside>
@@ -2519,6 +2759,31 @@ function App() {
     </${Modal}>
 
     <${Modal}
+      open=${uiState.showToolModal}
+      title="工具控制"
+      eyebrow="工具控制"
+      onClose=${() => setUiState((current) => normalizeUiState({ ...current, showToolModal: false }))}
+      variant="prompt-center"
+    >
+      <${ToolCenter}
+        tools=${toolSections}
+        activeToolId=${uiState.activeToolId}
+        onSelect=${(nextToolId) =>
+          setUiState((current) =>
+            normalizeUiState({
+              ...current,
+              activeToolId: nextToolId,
+            }))}
+        onToggle=${handleToggleTool}
+        togglingToolId=${toolTogglingId}
+        loading=${toolLoading}
+        error=${toolError}
+        saveFeedback=${toolSaveFeedback}
+        saveFeedbackTone=${toolSaveFeedbackTone}
+      />
+    </${Modal}>
+
+    <${Modal}
       open=${uiState.showArtifactModal && Boolean(activeArtifact)}
       title=${activeArtifact ? activeArtifact.title || activeArtifact.name : "文件预览"}
       eyebrow="文件预览"
@@ -2586,6 +2851,7 @@ function App() {
           ? html`<div className="detail-grid modal-grid">
               <${InfoCard} label="ID" value=${selectedAgent.id} />
               <${InfoCard} label="Name" value=${selectedAgent.name} />
+              <${InfoCard} label="Scope" value=${selectedAgent.scope || selectedAgent.role || selectedAgent.description || "未定义"} wide=${true} />
               <${InfoCard} label="Role" value=${selectedAgent.role || "未定义"} />
               <${InfoCard} label="Status" value=${stepLabel(selectedAgent.status)} />
               <${InfoCard} label="Current task" value=${selectedAgent.current_task_title || "待命中"} wide=${true} />

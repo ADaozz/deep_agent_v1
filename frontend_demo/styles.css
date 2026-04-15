@@ -1286,6 +1286,11 @@ button {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.worker-metric-grid {
+  grid-template-columns: minmax(110px, 0.8fr) minmax(140px, 0.9fr) minmax(220px, 1.6fr);
+  align-items: stretch;
+}
+
 .metric-card {
   display: flex;
   flex-direction: column;
@@ -1333,6 +1338,34 @@ button {
 
 .info-card.wide {
   grid-column: span 2;
+}
+
+.tool-docstring {
+  max-height: min(56vh, 560px);
+  overflow-x: auto;
+  overflow-y: scroll;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel-alt) 72%, var(--panel));
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tool-content {
+  overflow: auto;
+}
+
+.tool-stack {
+  height: auto;
+  min-height: min-content;
+  padding-right: 2px;
 }
 
 .form-field {
@@ -1438,6 +1471,7 @@ button {
 }
 
 .prompt-nav-item,
+.tool-nav-card,
 .history-thread-card,
 .prompt-meta-card,
 .prompt-code-block {
@@ -1881,10 +1915,115 @@ button {
   border-color: var(--border-strong);
 }
 
+.tool-nav-card {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: 160ms ease;
+}
+
+.tool-nav-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+}
+
 .prompt-nav-item.is-active,
+.tool-nav-card.is-active,
 .history-thread-card.is-active {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent-soft) 44%, var(--panel-alt));
+}
+
+.tool-nav-main {
+  width: 100%;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.tool-nav-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tool-nav-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tool-switch {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 82%, var(--panel-soft));
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: 160ms ease;
+}
+
+.tool-switch:hover {
+  border-color: var(--border-strong);
+}
+
+.tool-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.tool-switch-track {
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--border-strong) 82%, transparent);
+  position: relative;
+  flex: 0 0 auto;
+  transition: 160ms ease;
+}
+
+.tool-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: white;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18);
+  transition: 160ms ease;
+}
+
+.tool-switch.is-on {
+  border-color: color-mix(in srgb, var(--success) 44%, var(--border));
+  background: color-mix(in srgb, var(--success-soft) 36%, var(--panel));
+}
+
+.tool-switch.is-on .tool-switch-track {
+  background: var(--success);
+}
+
+.tool-switch.is-on .tool-switch-thumb {
+  transform: translateX(14px);
+}
+
+.tool-switch.is-off {
+  border-color: color-mix(in srgb, var(--danger) 24%, var(--border));
+}
+
+.tool-switch.is-off .tool-switch-track {
+  background: color-mix(in srgb, var(--danger-soft) 44%, var(--border));
 }
 
 .prompt-nav-title {

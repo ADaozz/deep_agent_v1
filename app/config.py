@@ -58,6 +58,8 @@ class Settings:
     model: str
     api_key: str
     base_url: str | None
+    model_timeout: int
+    model_max_retries: int
     log_level: str
     log_file: str
     backend: str
@@ -89,6 +91,18 @@ def load_settings(argv: Sequence[str] | None = None) -> Settings:
             or "gpt-4o-mini"
         ),
         help="OpenAI-compatible chat model name.",
+    )
+    parser.add_argument(
+        "--model-timeout",
+        default=env_int("DEEP_AGENT_MODEL_TIMEOUT", 300),
+        type=int,
+        help="Model request timeout in seconds.",
+    )
+    parser.add_argument(
+        "--model-max-retries",
+        default=env_int("DEEP_AGENT_MODEL_MAX_RETRIES", 2),
+        type=int,
+        help="Model request retry count for transient network failures.",
     )
     parser.add_argument(
         "--log-level",
@@ -163,6 +177,8 @@ def load_settings(argv: Sequence[str] | None = None) -> Settings:
         model=args.model,
         api_key=api_key,
         base_url=base_url,
+        model_timeout=max(30, args.model_timeout),
+        model_max_retries=max(0, args.model_max_retries),
         log_level=args.log_level,
         log_file=args.log_file,
         backend=args.backend,

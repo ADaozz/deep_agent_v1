@@ -88,7 +88,21 @@ def write_evidence_todos(
     runtime: ToolRuntime[Any, EvidencePlanningState],
     todos: list[EvidenceTodoItem],
 ) -> Command[Any]:
-    """创建并更新子代理自己的私有证据型待办列表。"""
+    """创建或更新当前 worker 的私有 evidence checklist。
+
+    何时使用：
+    - worker 收到任务后必须优先调用。
+    - worker 每完成、阻塞或调整一个任务项时应更新完整 checklist。
+
+    使用规则：
+    - 每次传入当前 worker 的完整待办列表，而不是只传增量。
+    - completed 项必须包含具体 evidence。
+    - blocked 项必须说明阻塞原因和观察到的证据。
+    - 不要使用“已完成”“已检查”这类空泛 evidence。
+
+    返回：
+    - 更新后的私有 checklist 会进入 worker 状态，并展示到前端 worker 追踪中。
+    """
     normalized = _normalize_todos(todos)
     return Command(
         update={
@@ -104,7 +118,7 @@ def write_evidence_todos(
 
 
 class EvidenceTodoMiddleware(AgentMiddleware[EvidencePlanningState, Any, Any]):
-    """提供证据型私有待办管理，并阻止子代理过早结束。"""
+    """为 worker 注入 evidence checklist 规则，并阻止缺少证据的提前结束。"""
 
     state_schema = EvidencePlanningState
 
