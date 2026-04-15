@@ -1,6 +1,61 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROMPT_INSERTS_ROOT = PROJECT_ROOT / "PROMPT_INSERTS"
+
+
+DEEPRESEARCH_KEYWORDS = (
+    "deepresearch",
+    "deep research",
+    "事实核验",
+    "事实核查",
+    "核实",
+    "争议",
+    "benchmark",
+    "趋势",
+    "立场",
+    "是否成立",
+    "是否属实",
+    "技术话题",
+    "社区观点",
+    "来源",
+    "证据",
+    "调研",
+    "研究",
+)
+
+
+def _strip_frontmatter(content: str) -> str:
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return content.strip()
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "\n".join(lines[index + 1 :]).strip()
+    return content.strip()
+
+
+def _load_prompt_insert(filename: str, fallback: str = "") -> str:
+    prompt_path = PROMPT_INSERTS_ROOT / filename
+    try:
+        content = prompt_path.read_text(encoding="utf-8")
+    except OSError:
+        return fallback.strip()
+    return _strip_frontmatter(content)
+
+
+def _is_deepresearch_query(query: str | None) -> bool:
+    normalized = (query or "").strip().lower()
+    if not normalized:
+        return False
+    return any(keyword in normalized for keyword in DEEPRESEARCH_KEYWORDS)
+
+
+DEEPRESEARCH_SPEC_PROMPT = _load_prompt_insert("deepresearch-spec.md")
 
 DEFAULT_USER_PROMPT = """
 # 默认用户提示词
@@ -384,16 +439,29 @@ PROMPT_METADATA = {
         "title": "Worker 规划器",
         "subtitle": "负责判断是否拆分动态 worker，并生成本轮 worker 名册。",
         "source": "app/prompts.py",
+        "kind": "builtin",
+        "tags": ["内置"],
     },
     "supervisor-system": {
         "title": "Supervisor 系统提示词",
         "subtitle": "约束 supervisor 的分治、派发、收敛与本地取材边界。",
         "source": "app/prompts.py",
+        "kind": "builtin",
+        "tags": ["内置"],
     },
     "evidence-todo": {
         "title": "Worker Evidence Todo 守卫",
         "subtitle": "约束 worker 必须写证据型 checklist 并完成后才能结束。",
         "source": "app/agent/todo_enforcer.py",
+        "kind": "builtin",
+        "tags": ["内置"],
+    },
+    "deepresearch-spec": {
+        "title": "DeepResearch 场景增强",
+        "subtitle": "用于争议性技术话题、事实核验、benchmark 解读、立场判断与趋势分析。",
+        "source": "PROMPT_INSERTS/deepresearch-spec.md",
+        "kind": "prompt_insert",
+        "tags": ["动态加载", "Prompt Insert"],
     },
 }
 
@@ -402,6 +470,7 @@ _PROMPT_STORE = {
     "worker-planner": RUNTIME_WORKER_PLANNER_PROMPT,
     "supervisor-system": SUPERVISOR_SYSTEM_PROMPT_TEMPLATE,
     "evidence-todo": EVIDENCE_TODO_SYSTEM_PROMPT,
+    "deepresearch-spec": DEEPRESEARCH_SPEC_PROMPT,
 }
 _PROMPT_DEFAULTS = deepcopy(_PROMPT_STORE)
 
@@ -418,17 +487,28 @@ def get_evidence_todo_system_prompt() -> str:
     return _PROMPT_STORE["evidence-todo"].strip()
 
 
-def build_supervisor_system_prompt(*, max_rounds: int = 12) -> str:
+def build_supervisor_system_prompt(*, max_rounds: int = 12, query: str | None = None) -> str:
     template = _PROMPT_STORE["supervisor-system"].strip()
     try:
-        return template.format(max_rounds=max_rounds)
+        rendered = template.format(max_rounds=max_rounds)
     except Exception:
-        return template
+        rendered = template
+
+    if _is_deepresearch_query(query):
+        deepresearch_spec = _PROMPT_STORE.get("deepresearch-spec", "").strip()
+        if deepresearch_spec:
+            rendered = (
+                f"{rendered}\n\n"
+                "# Scenario Insert: deepresearch-spec\n\n"
+                "以下场景增强只在用户请求属于争议性技术话题、事实核验、benchmark 解读、立场判断或趋势分析时启用。\n\n"
+                f"{deepresearch_spec}"
+            )
+    return rendered
 
 
 def get_prompt_sections(*, max_rounds: int = 12) -> list[dict[str, str]]:
     sections: list[dict[str, str]] = []
-    for prompt_id in ("worker-planner", "supervisor-system", "evidence-todo"):
+    for prompt_id in ("worker-planner", "supervisor-system", "deepresearch-spec", "evidence-todo"):
         meta = deepcopy(PROMPT_METADATA[prompt_id])
         if prompt_id == "supervisor-system":
             content = build_supervisor_system_prompt(max_rounds=max_rounds)

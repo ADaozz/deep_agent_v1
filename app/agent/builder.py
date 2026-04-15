@@ -128,7 +128,7 @@ def build_agent_bundle(
         runtime_tools=runtime_tools,
     )
     runtime_catalog = roster_payload["workers"]
-    system_prompt = build_supervisor_system_prompt(max_rounds=12)
+    system_prompt = build_supervisor_system_prompt(max_rounds=12, query=runtime_query)
     agent_tools: list[Any] = []
     agent_tools.append(
         runtime_tools["generate_subagents_factory"](

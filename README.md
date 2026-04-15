@@ -564,6 +564,10 @@ DASHSCOPE_MODEL=
 LOG_LEVEL=INFO
 DEEP_AGENT_LOG_FILE=runtime_logs/deep_agent_stream.jsonl
 
+# Tavily search tool
+TAVILY_API_KEY_LWT=
+TAVILY_API_KEY_LWT_BK=
+
 # PostgreSQL chat history
 DEEP_AGENT_PG_HOST=127.0.0.1
 DEEP_AGENT_PG_PORT=5432
@@ -609,6 +613,7 @@ DASHSCOPE_MODEL=qwen3.5-plus
 - 模型请求超时默认读 `DEEP_AGENT_MODEL_TIMEOUT=300`，可用 `--model-timeout` 覆盖
 - 模型瞬时网络错误重试次数默认读 `DEEP_AGENT_MODEL_MAX_RETRIES=2`，可用 `--model-max-retries` 覆盖
 - backend 默认取 `DEEP_AGENT_BACKEND=filesystem`
+- Tavily 搜索工具优先读 `TAVILY_API_KEY_LWT`；当主 key 出现额度、限流或鉴权类错误时，会自动尝试 `TAVILY_API_KEY_LWT_BK`
 - SSH 工具默认从 `.env` 读取 `DEEP_AGENT_SSH_*`
 - PostgreSQL 会话持久化默认从 `.env` 读取 `DEEP_AGENT_PG_*`
 
@@ -831,6 +836,7 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 
 - 运行时 worker 规划器提示词
 - supervisor 系统提示词
+- Prompt Insert 动态插片，例如 `deepresearch-spec`
 - worker evidence todo 守卫提示词
 
 提示词保存是“进程内热更新”：
@@ -839,7 +845,29 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 - 对后续新任务立即生效
 - 但服务重启后仍会回到代码中的默认值
 
-### 3. 文件产物卡片
+### 3. Prompt Insert 动态插片
+
+`PROMPT_INSERTS/` 用于存放按场景动态加载的提示词插片。它们不是完整 system prompt，而是追加在 supervisor 底座提示词后面的场景增强块。
+
+注意：这个功能目前还只是实验性雏形，整体设计还没有完全构思好。当前后端只用了很简陋的关键词 / 字符串匹配来判断是否注入插片，主要用于验证 `deepresearch-spec` 这类 prompt insert 是否真的会影响运行效果。它还不是稳定的 prompt routing 方案。
+
+当前内置插片：
+
+- [deepresearch-spec.md](PROMPT_INSERTS/deepresearch-spec.md)
+  - 适用于争议性技术话题、事实核验、benchmark 解读、立场判断与趋势分析
+  - 关注来源层级、语境、机制、代表性、可外推性与问题是否已被现实改写
+  - 当 query 命中 `deepresearch`、事实核验、benchmark、趋势、争议、来源、证据、调研、研究等关键词时自动注入
+
+前端提示词管理中心会把这类提示词打上 `动态加载` / `Prompt Insert` 标签，用来和 `worker-planner`、`supervisor-system`、`evidence-todo` 这类内置提示词区分。
+
+运行时行为：
+
+- 普通本地文件总结、代码解释、轻量问答不会加载 `deepresearch-spec`
+- 命中 DeepResearch 场景时，后端会在 supervisor system prompt 末尾追加 `# Scenario Insert: deepresearch-spec`
+- 该插片只增强研究判断框架，不替换 supervisor 的调度、工具边界、worker evidence checklist 等底座规则
+- 前端保存后的插片内容会在当前后端进程内热更新；重启服务后会重新从 `PROMPT_INSERTS/deepresearch-spec.md` 加载默认内容
+
+### 4. 文件产物卡片
 
 如果 supervisor 在 `workspace/` 中生成了结果文件，并调用 `publish_workspace_file`，前端会在会话底部渲染文件卡片。
 

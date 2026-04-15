@@ -2031,6 +2031,33 @@ button {
   font-weight: 700;
 }
 
+.prompt-nav-head,
+.prompt-meta-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.prompt-nav-head {
+  justify-content: space-between;
+}
+
+.prompt-meta-tags {
+  justify-content: flex-end;
+}
+
+.prompt-kind-tag {
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
+.prompt-kind-tag.is-dynamic {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 52%, transparent);
+}
+
 .prompt-nav-subtitle {
   margin-top: 6px;
   color: var(--text-dim);
@@ -2038,24 +2065,35 @@ button {
   line-height: 1.6;
 }
 
-.history-thread-list {
+.history-center-shell {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+}
+
+.history-thread-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   overflow: auto;
+  padding-right: 8px;
+  scrollbar-gutter: stable;
 }
 
 .history-thread-card {
   width: 100%;
   padding: 0;
   display: flex;
-  align-items: stretch;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
   color: inherit;
   transition: 160ms ease;
   border-radius: 14px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .history-thread-card:hover {
@@ -2066,7 +2104,9 @@ button {
 .history-thread-main {
   flex: 1 1 auto;
   min-width: 0;
-  padding: 14px;
+  width: 100%;
+  display: block;
+  padding: 18px;
   text-align: left;
   color: inherit;
   cursor: pointer;
@@ -2078,8 +2118,9 @@ button {
 
 .history-thread-delete {
   flex: 0 0 auto;
-  align-self: center;
-  margin-right: 10px;
+  align-self: flex-start;
+  margin-top: 12px;
+  margin-right: 12px;
   color: var(--danger);
   border-color: transparent;
   background: transparent;
@@ -2108,24 +2149,23 @@ button {
 }
 
 .history-thread-title {
-  font-size: 14px;
+  font-size: 14.5px;
   font-weight: 700;
-  line-height: 1.5;
+  line-height: 1.6;
   word-break: break-word;
 }
 
 .history-thread-query {
-  margin-top: 8px;
+  margin-top: 10px;
   color: var(--text-dim);
-  line-height: 1.7;
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  line-height: 1.85;
+  white-space: normal;
+  overflow: visible;
+  word-break: break-word;
 }
 
 .history-thread-meta {
-  margin-top: 10px;
+  margin-top: 12px;
   color: var(--text-muted);
   font-size: 12px;
   font-family: var(--font-mono);

@@ -1145,6 +1145,11 @@ function PromptCenter({
   readOnly = false,
 }) {
   const activePrompt = prompts.find((item) => item.id === activePromptId) || prompts[0] || null;
+  const promptTags = (prompt) => {
+    const tags = Array.isArray(prompt?.tags) ? prompt.tags.filter(Boolean) : [];
+    if (!tags.length && prompt?.kind === "prompt_insert") return ["动态加载"];
+    return tags;
+  };
 
   return html`<div className="prompt-browser">
     <div className="prompt-nav">
@@ -1157,7 +1162,12 @@ function PromptCenter({
                 className=${`prompt-nav-item ${prompt.id === (activePrompt?.id || "") ? "is-active" : ""}`}
                 onClick=${() => onSelect(prompt.id)}
               >
-                <div className="prompt-nav-title">${prompt.title}</div>
+                <div className="prompt-nav-head">
+                  <div className="prompt-nav-title">${prompt.title}</div>
+                  ${promptTags(prompt).map(
+                    (tag) => html`<span key=${tag} className=${`tag prompt-kind-tag ${prompt.kind === "prompt_insert" ? "is-dynamic" : ""}`}>${tag}</span>`
+                  )}
+                </div>
                 <div className="prompt-nav-subtitle">${prompt.subtitle}</div>
               </button>`
             )
@@ -1182,7 +1192,12 @@ function PromptCenter({
                       <div className="summary-title">${activePrompt.title}</div>
                       <div className="summary-subtitle">${activePrompt.subtitle}</div>
                     </div>
-                    <span className="tag">${activePrompt.source}</span>
+                    <div className="prompt-meta-tags">
+                      ${promptTags(activePrompt).map(
+                        (tag) => html`<span key=${tag} className=${`tag prompt-kind-tag ${activePrompt.kind === "prompt_insert" ? "is-dynamic" : ""}`}>${tag}</span>`
+                      )}
+                      <span className="tag">${activePrompt.source}</span>
+                    </div>
                   </div>
                   <div className="prompt-toolbar">
                     <span className="prompt-toolbar-note">
@@ -1225,58 +1240,60 @@ function HistoryCenter({
   interactionLocked = false,
 }) {
   if (loading) {
-    return html`<div className="empty-block">
+    return html`<div className="history-center-shell"><div className="empty-block">
       <span className="loading-inline">
         <${LoaderCircle} className="h-4 w-4 animate-spin" />
         <span>正在加载历史会话...</span>
       </span>
-    </div>`;
+    </div></div>`;
   }
 
   if (error) {
-    return html`<div className="alert-block">${error}</div>`;
+    return html`<div className="history-center-shell"><div className="alert-block">${error}</div></div>`;
   }
 
   if (!threads.length) {
-    return html`<div className="empty-block">当前还没有已持久化的历史线程。</div>`;
+    return html`<div className="history-center-shell"><div className="empty-block">当前还没有已持久化的历史线程。</div></div>`;
   }
 
-  return html`<div className="history-thread-list">
-    ${threads.map(
-      (thread) => html`<div
-        key=${thread.thread_id}
-        className=${`history-thread-card ${thread.thread_id === activeThreadId ? "is-active" : ""}`}
-      >
-        <button
-          type="button"
-          className="history-thread-main"
-          onClick=${() => onSelectThread(thread.thread_id)}
-          disabled=${interactionLocked}
+  return html`<div className="history-center-shell">
+    <div className="history-thread-list">
+      ${threads.map(
+        (thread) => html`<div
+          key=${thread.thread_id}
+          className=${`history-thread-card ${thread.thread_id === activeThreadId ? "is-active" : ""}`}
         >
-          <div className="history-thread-head">
-            <div className="history-thread-title">${thread.thread_id}</div>
-            <span className="tag">${thread.session_count} 条</span>
-          </div>
-          <div className="history-thread-query">${thread.latest_query || "无最近问题摘要"}</div>
-          <div className="history-thread-meta">${formatUtc8Timestamp(thread.updated_at)}</div>
-        </button>
-        <button
-          type="button"
-          className="icon-button history-thread-delete"
-          aria-label="删除历史线程"
-          title="删除历史线程"
-          disabled=${interactionLocked || deletingThreadId === thread.thread_id}
-          onClick=${(event) => {
-            event.stopPropagation();
-            onDeleteThread(thread.thread_id);
-          }}
-        >
-          ${deletingThreadId === thread.thread_id
-            ? html`<${LoaderCircle} className="h-4 w-4 animate-spin" />`
-            : html`<${Trash2} className="h-4 w-4" />`}
-        </button>
-      </div>`
-    )}
+          <button
+            type="button"
+            className="history-thread-main"
+            onClick=${() => onSelectThread(thread.thread_id)}
+            disabled=${interactionLocked}
+          >
+            <div className="history-thread-head">
+              <div className="history-thread-title">${thread.thread_id}</div>
+              <span className="tag">${thread.session_count} 条</span>
+            </div>
+            <div className="history-thread-query">${thread.latest_query || "无最近问题摘要"}</div>
+            <div className="history-thread-meta">${formatUtc8Timestamp(thread.updated_at)}</div>
+          </button>
+          <button
+            type="button"
+            className="icon-button history-thread-delete"
+            aria-label="删除历史线程"
+            title="删除历史线程"
+            disabled=${interactionLocked || deletingThreadId === thread.thread_id}
+            onClick=${(event) => {
+              event.stopPropagation();
+              onDeleteThread(thread.thread_id);
+            }}
+          >
+            ${deletingThreadId === thread.thread_id
+              ? html`<${LoaderCircle} className="h-4 w-4 animate-spin" />`
+              : html`<${Trash2} className="h-4 w-4" />`}
+          </button>
+        </div>`
+      )}
+    </div>
   </div>`;
 }
 

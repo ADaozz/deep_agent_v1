@@ -28,6 +28,47 @@ def _bounded_float(value: float, *, minimum: float, maximum: float, default: flo
     return min(max(parsed, minimum), maximum)
 
 
+def _tavily_credentials() -> list[tuple[str, str]]:
+    primary_key = env_str("TAVILY_API_KEY_LWT").strip()
+    backup_key = env_str("TAVILY_API_KEY_LWT_BK").strip()
+    credentials: list[tuple[str, str]] = []
+    if primary_key:
+        credentials.append(("primary", primary_key))
+    if backup_key and backup_key != primary_key:
+        credentials.append(("backup", backup_key))
+    return credentials
+
+
+def _should_try_backup_tavily_key(exc: Exception) -> bool:
+    message = f"{type(exc).__name__}: {exc}".lower()
+    fallback_markers = (
+        "quota",
+        "credit",
+        "usage",
+        "exhaust",
+        "limit",
+        "rate",
+        "429",
+        "402",
+        "401",
+        "403",
+        "unauthorized",
+        "forbidden",
+        "payment",
+        "insufficient",
+    )
+    return any(marker in message for marker in fallback_markers)
+
+
+def _format_tavily_failure(query: str, failures: list[str]) -> str:
+    failure_text = "\n".join(failures) if failures else "unknown_error"
+    return (
+        "tavily_search 失败\n"
+        f"query: {query}\n"
+        f"output:\n{failure_text}"
+    )
+
+
 @tool
 def tavily_search(
     query: str,
@@ -82,8 +123,8 @@ def tavily_search(
     if not cleaned_query:
         return "tavily_search 失败：缺少 query。"
 
-    api_key = env_str("TAVILY_API_KEY_LWT").strip()
-    if not api_key:
+    credentials = _tavily_credentials()
+    if not credentials:
         return "tavily_search 失败：搜索凭据未配置，请让用户检查工具后端配置。"
 
     normalized_depth = search_depth.strip().lower()
@@ -119,17 +160,22 @@ def tavily_search(
     }
     request_kwargs.update({key: value for key, value in optional_text_params.items() if value})
 
-    try:
-        client = TavilyClient(api_key=api_key)
-        response = client.search(**request_kwargs)
-    except Exception as exc:  # noqa: BLE001
-        return (
-            "tavily_search 失败\n"
-            f"query: {cleaned_query}\n"
-            f"output:\n{type(exc).__name__}: {exc}"
-        )
+    failures: list[str] = []
+    for index, (credential_label, api_key) in enumerate(credentials):
+        try:
+            client = TavilyClient(api_key=api_key)
+            response = client.search(**request_kwargs)
+            if credential_label == "backup":
+                response["_tool_meta"] = {"credential": "backup", "fallback_used": index > 0}
+            return json.dumps(response, ensure_ascii=False, indent=2)
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"{credential_label}: {type(exc).__name__}: {exc}")
+            has_backup = any(label == "backup" for label, _key in credentials[index + 1 :])
+            if credential_label == "primary" and has_backup and _should_try_backup_tavily_key(exc):
+                continue
+            return _format_tavily_failure(cleaned_query, failures)
 
-    return json.dumps(response, ensure_ascii=False, indent=2)
+    return _format_tavily_failure(cleaned_query, failures)
 
 
 @tool
