@@ -1,61 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from pathlib import Path
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PROMPT_INSERTS_ROOT = PROJECT_ROOT / "PROMPT_INSERTS"
-
-
-DEEPRESEARCH_KEYWORDS = (
-    "deepresearch",
-    "deep research",
-    "事实核验",
-    "事实核查",
-    "核实",
-    "争议",
-    "benchmark",
-    "趋势",
-    "立场",
-    "是否成立",
-    "是否属实",
-    "技术话题",
-    "社区观点",
-    "来源",
-    "证据",
-    "调研",
-    "研究",
-)
-
-
-def _strip_frontmatter(content: str) -> str:
-    lines = content.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return content.strip()
-    for index, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---":
-            return "\n".join(lines[index + 1 :]).strip()
-    return content.strip()
-
-
-def _load_prompt_insert(filename: str, fallback: str = "") -> str:
-    prompt_path = PROMPT_INSERTS_ROOT / filename
-    try:
-        content = prompt_path.read_text(encoding="utf-8")
-    except OSError:
-        return fallback.strip()
-    return _strip_frontmatter(content)
-
-
-def _is_deepresearch_query(query: str | None) -> bool:
-    normalized = (query or "").strip().lower()
-    if not normalized:
-        return False
-    return any(keyword in normalized for keyword in DEEPRESEARCH_KEYWORDS)
-
-
-DEEPRESEARCH_SPEC_PROMPT = _load_prompt_insert("deepresearch-spec.md")
+from app.skill_store import build_supervisor_skill_prompt_suffix
 
 DEFAULT_USER_PROMPT = """
 # 默认用户提示词
@@ -456,13 +403,6 @@ PROMPT_METADATA = {
         "kind": "builtin",
         "tags": ["内置"],
     },
-    "deepresearch-spec": {
-        "title": "DeepResearch 场景增强",
-        "subtitle": "用于争议性技术话题、事实核验、benchmark 解读、立场判断与趋势分析。",
-        "source": "PROMPT_INSERTS/deepresearch-spec.md",
-        "kind": "prompt_insert",
-        "tags": ["动态加载", "Prompt Insert"],
-    },
 }
 
 _PROMPT_STORE = {
@@ -470,7 +410,6 @@ _PROMPT_STORE = {
     "worker-planner": RUNTIME_WORKER_PLANNER_PROMPT,
     "supervisor-system": SUPERVISOR_SYSTEM_PROMPT_TEMPLATE,
     "evidence-todo": EVIDENCE_TODO_SYSTEM_PROMPT,
-    "deepresearch-spec": DEEPRESEARCH_SPEC_PROMPT,
 }
 _PROMPT_DEFAULTS = deepcopy(_PROMPT_STORE)
 
@@ -494,21 +433,16 @@ def build_supervisor_system_prompt(*, max_rounds: int = 12, query: str | None = 
     except Exception:
         rendered = template
 
-    if _is_deepresearch_query(query):
-        deepresearch_spec = _PROMPT_STORE.get("deepresearch-spec", "").strip()
-        if deepresearch_spec:
-            rendered = (
-                f"{rendered}\n\n"
-                "# Scenario Insert: deepresearch-spec\n\n"
-                "以下场景增强只在用户请求属于争议性技术话题、事实核验、benchmark 解读、立场判断或趋势分析时启用。\n\n"
-                f"{deepresearch_spec}"
-            )
+    skill_suffix = build_supervisor_skill_prompt_suffix(query=query)
+    if skill_suffix:
+        rendered = f"{rendered}\n\n{skill_suffix}"
     return rendered
 
 
 def get_prompt_sections(*, max_rounds: int = 12) -> list[dict[str, str]]:
     sections: list[dict[str, str]] = []
-    for prompt_id in ("worker-planner", "supervisor-system", "deepresearch-spec", "evidence-todo"):
+    prompt_order = ("worker-planner", "supervisor-system", "evidence-todo")
+    for prompt_id in prompt_order:
         meta = deepcopy(PROMPT_METADATA[prompt_id])
         if prompt_id == "supervisor-system":
             content = build_supervisor_system_prompt(max_rounds=max_rounds)

@@ -1409,9 +1409,9 @@ button {
 }
 
 .modal-card.is-prompt-center {
-  width: min(100%, 1120px);
-  height: min(88vh, 760px);
-  max-height: min(88vh, 760px);
+  width: min(100%, 1240px);
+  height: min(90vh, 840px);
+  max-height: min(90vh, 840px);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -2027,6 +2027,8 @@ button {
 }
 
 .prompt-nav-title {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 14px;
   font-weight: 700;
 }
@@ -2241,6 +2243,54 @@ button {
   line-height: 1.75;
 }
 
+.skill-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.skill-preview-card {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skill-frontmatter-list,
+.skill-body-preview {
+  min-height: 0;
+  max-height: 260px;
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.skill-frontmatter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.skill-frontmatter-row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.skill-frontmatter-key {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.skill-frontmatter-value,
+.skill-body-preview {
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
 .step-pop {
   animation: step-pop 180ms ease-out;
 }
@@ -2299,6 +2349,14 @@ button {
   }
 
   .prompt-browser {
+    grid-template-columns: 1fr;
+  }
+
+  .skill-preview-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .skill-frontmatter-row {
     grid-template-columns: 1fr;
   }
 

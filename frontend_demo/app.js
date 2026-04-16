@@ -70,12 +70,15 @@ const DEFAULT_UI_STATE = {
   theme: DEFAULT_THEME,
   query: DEFAULT_QUERY,
   showPromptModal: false,
+  showSkillModal: false,
   showHistoryModal: false,
   showToolModal: false,
   showArtifactModal: false,
   activePromptId: "",
+  activeSkillId: "",
   activeToolId: "",
   promptDraft: "",
+  skillDraft: "",
   selectedAgentId: "",
   activeArtifactPath: "",
 };
@@ -103,6 +106,12 @@ function normalizeUiState(snapshot = {}) {
         : typeof snapshot.show_prompt_modal === "boolean"
           ? snapshot.show_prompt_modal
           : DEFAULT_UI_STATE.showPromptModal,
+    showSkillModal:
+      typeof snapshot.showSkillModal === "boolean"
+        ? snapshot.showSkillModal
+        : typeof snapshot.show_skill_modal === "boolean"
+          ? snapshot.show_skill_modal
+          : DEFAULT_UI_STATE.showSkillModal,
     showHistoryModal:
       typeof snapshot.showHistoryModal === "boolean"
         ? snapshot.showHistoryModal
@@ -127,6 +136,12 @@ function normalizeUiState(snapshot = {}) {
         : typeof snapshot.active_prompt_id === "string"
           ? snapshot.active_prompt_id
           : DEFAULT_UI_STATE.activePromptId,
+    activeSkillId:
+      typeof snapshot.activeSkillId === "string"
+        ? snapshot.activeSkillId
+        : typeof snapshot.active_skill_id === "string"
+          ? snapshot.active_skill_id
+          : DEFAULT_UI_STATE.activeSkillId,
     activeToolId:
       typeof snapshot.activeToolId === "string"
         ? snapshot.activeToolId
@@ -139,6 +154,12 @@ function normalizeUiState(snapshot = {}) {
         : typeof snapshot.prompt_draft === "string"
           ? snapshot.prompt_draft
           : DEFAULT_UI_STATE.promptDraft,
+    skillDraft:
+      typeof snapshot.skillDraft === "string"
+        ? snapshot.skillDraft
+        : typeof snapshot.skill_draft === "string"
+          ? snapshot.skill_draft
+          : DEFAULT_UI_STATE.skillDraft,
     selectedAgentId:
       typeof snapshot.selectedAgentId === "string"
         ? snapshot.selectedAgentId
@@ -160,12 +181,15 @@ function buildUiStateSnapshot(uiState) {
     theme: normalized.theme,
     query: normalized.query,
     showPromptModal: false,
+    showSkillModal: false,
     showHistoryModal: false,
     showToolModal: false,
     showArtifactModal: false,
     activePromptId: normalized.activePromptId,
+    activeSkillId: normalized.activeSkillId,
     activeToolId: normalized.activeToolId,
     promptDraft: normalized.promptDraft,
+    skillDraft: normalized.skillDraft,
     selectedAgentId: normalized.selectedAgentId,
     activeArtifactPath: normalized.activeArtifactPath,
   };
@@ -1146,8 +1170,7 @@ function PromptCenter({
 }) {
   const activePrompt = prompts.find((item) => item.id === activePromptId) || prompts[0] || null;
   const promptTags = (prompt) => {
-    const tags = Array.isArray(prompt?.tags) ? prompt.tags.filter(Boolean) : [];
-    if (!tags.length && prompt?.kind === "prompt_insert") return ["动态加载"];
+    const tags = Array.isArray(prompt?.tags) ? [...prompt.tags.filter(Boolean)] : [];
     return tags;
   };
 
@@ -1162,10 +1185,10 @@ function PromptCenter({
                 className=${`prompt-nav-item ${prompt.id === (activePrompt?.id || "") ? "is-active" : ""}`}
                 onClick=${() => onSelect(prompt.id)}
               >
-                <div className="prompt-nav-head">
+                  <div className="prompt-nav-head">
                   <div className="prompt-nav-title">${prompt.title}</div>
                   ${promptTags(prompt).map(
-                    (tag) => html`<span key=${tag} className=${`tag prompt-kind-tag ${prompt.kind === "prompt_insert" ? "is-dynamic" : ""}`}>${tag}</span>`
+                    (tag) => html`<span key=${tag} className="tag prompt-kind-tag">${tag}</span>`
                   )}
                 </div>
                 <div className="prompt-nav-subtitle">${prompt.subtitle}</div>
@@ -1194,7 +1217,7 @@ function PromptCenter({
                     </div>
                     <div className="prompt-meta-tags">
                       ${promptTags(activePrompt).map(
-                        (tag) => html`<span key=${tag} className=${`tag prompt-kind-tag ${activePrompt.kind === "prompt_insert" ? "is-dynamic" : ""}`}>${tag}</span>`
+                        (tag) => html`<span key=${tag} className="tag prompt-kind-tag">${tag}</span>`
                       )}
                       <span className="tag">${activePrompt.source}</span>
                     </div>
@@ -1224,6 +1247,157 @@ function PromptCenter({
                   ></textarea>
                 </div>`
               : html`<div className="empty-block">请选择左侧的提示词模块。</div>`
+      }
+    </div>
+  </div>`;
+}
+
+function stringifyYamlScalar(value) {
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return String(value);
+  if (value == null) return '""';
+  const text = String(value);
+  if (!text.length) return '""';
+  if (/^[\w./:-]+$/u.test(text) && !/^(true|false|null|~)$/i.test(text)) {
+    return text;
+  }
+  return JSON.stringify(text);
+}
+
+function buildRawSkillDocument(frontmatter = {}, body = "") {
+  const entries = Object.entries(frontmatter || {});
+  const lines = ["---"];
+  for (const [key, value] of entries) {
+    if (Array.isArray(value)) {
+      lines.push(`${key}:`);
+      for (const item of value) {
+        lines.push(`  - ${stringifyYamlScalar(item)}`);
+      }
+      continue;
+    }
+    lines.push(`${key}: ${stringifyYamlScalar(value)}`);
+  }
+  lines.push("---", "", (body || "").trim());
+  return lines.join("\n").trim();
+}
+
+function SkillCenter({
+  skills,
+  activeSkillId,
+  onSelect,
+  loading,
+  error,
+  draftContent,
+  onDraftChange,
+  onSave,
+  onReset,
+  saveFeedback,
+  saveFeedbackTone,
+  saving,
+  resetting,
+  readOnly = false,
+}) {
+  const activeSkill = skills.find((item) => item.id === activeSkillId) || skills[0] || null;
+  const skillDisplayName = (skill) => {
+    const frontmatterName = typeof skill?.frontmatter?.name === "string" ? skill.frontmatter.name.trim() : "";
+    return frontmatterName || skill?.id || "";
+  };
+  const scopeLabel = (skill) => {
+    if (skill?.skill_scope === "supervisor") return "Supervisor Skill";
+    if (skill?.skill_scope === "worker") return "Worker Skill";
+    return "Skill";
+  };
+  const renderFrontmatterValue = (value) => {
+    if (Array.isArray(value)) return value.join(", ");
+    if (value && typeof value === "object") return JSON.stringify(value, null, 2);
+    return String(value ?? "");
+  };
+
+  return html`<div className="prompt-browser">
+    <div className="prompt-nav">
+      ${
+        skills.length
+          ? skills.map(
+              (skill) => html`<button
+                key=${skill.id}
+                type="button"
+                className=${`prompt-nav-item ${skill.id === (activeSkill?.id || "") ? "is-active" : ""}`}
+                onClick=${() => onSelect(skill.id)}
+              >
+                <div className="prompt-nav-head">
+                  <div className="prompt-nav-title">${skillDisplayName(skill)}</div>
+                  <span className="tag prompt-kind-tag is-dynamic">${scopeLabel(skill)}</span>
+                </div>
+              </button>`
+            )
+          : html`<div className="empty-block">当前没有可展示的 skill。</div>`
+      }
+    </div>
+    <div className="prompt-content">
+      ${
+        loading
+          ? html`<div className="empty-block">
+              <span className="loading-inline">
+                <${LoaderCircle} className="h-4 w-4 animate-spin" />
+                <span>正在加载 skill...</span>
+              </span>
+            </div>`
+          : error
+            ? html`<div className="alert-block">${error}</div>`
+            : activeSkill
+              ? html`<div className="stack-block prompt-stack">
+                  <div className="prompt-meta-card">
+                    <div>
+                      <div className="summary-title">${skillDisplayName(activeSkill)}</div>
+                    </div>
+                    <div className="prompt-meta-tags">
+                      <span className="tag prompt-kind-tag is-dynamic">${scopeLabel(activeSkill)}</span>
+                      <span className="tag">${activeSkill.source}</span>
+                    </div>
+                  </div>
+                  <div className="prompt-toolbar">
+                    <span className="prompt-toolbar-note">
+                      ${readOnly ? "执行中可查看 skill，但暂不允许修改或保存。" : "skill 使用 YAML 头 + 正文结构；保存后会立即影响后续运行。"}
+                    </span>
+                    <div className="prompt-toolbar-actions">
+                      <button type="button" className="secondary-button" onClick=${onReset} disabled=${readOnly || saving || resetting}>
+                        ${resetting ? html`<${LoaderCircle} className="h-4 w-4 animate-spin" />` : null}
+                        <span>${resetting ? "恢复中" : "恢复默认"}</span>
+                      </button>
+                      <button type="button" className="primary-button" onClick=${onSave} disabled=${readOnly || saving || resetting}>
+                        ${saving ? html`<${LoaderCircle} className="h-4 w-4 animate-spin" />` : null}
+                        <span>${saving ? "保存中" : "保存 Skill"}</span>
+                      </button>
+                    </div>
+                  </div>
+                  ${saveFeedback ? html`<div className=${saveFeedbackTone === "success" ? "success-block" : saveFeedbackTone === "error" ? "alert-block" : "note-block"}>${saveFeedback}</div>` : null}
+                  <div className="skill-preview-grid">
+                    <div className="info-card wide skill-preview-card">
+                      <div className="info-label">YAML 头属性</div>
+                      <div className="skill-frontmatter-list">
+                        ${
+                          Object.entries(activeSkill.frontmatter || {}).length
+                            ? Object.entries(activeSkill.frontmatter || {}).map(
+                                ([key, value]) => html`<div key=${key} className="skill-frontmatter-row">
+                                  <div className="skill-frontmatter-key">${key}</div>
+                                  <div className="info-value preserve-lines skill-frontmatter-value">${renderFrontmatterValue(value)}</div>
+                                </div>`
+                              )
+                            : html`<div className="empty-block compact">当前没有 frontmatter 属性。</div>`
+                        }
+                      </div>
+                    </div>
+                  </div>
+                  <div className="info-label">正文编辑</div>
+                  <textarea
+                    className="field-control field-area prompt-editor"
+                    value=${draftContent}
+                    onChange=${(event) => onDraftChange(event.target.value)}
+                    spellCheck="false"
+                    readOnly=${readOnly}
+                  ></textarea>
+                </div>`
+              : html`<div className="empty-block">请选择左侧的 skill 模块。</div>`
       }
     </div>
   </div>`;
@@ -1388,7 +1562,7 @@ function ToolCenter({
                     </div>
                     <div className="info-card wide">
                       <div className="info-label">Docstring</div>
-                      <div className="info-value preserve-lines tool-docstring">${activeTool.docstring || "该工具未提供 docstring。"}</div>
+                      <div className="tool-docstring">${activeTool.docstring || "该工具未提供 docstring。"}</div>
                     </div>
                   </div>
                   <div className="prompt-toolbar">
@@ -1449,6 +1623,13 @@ function App() {
   const [promptResetting, setPromptResetting] = useState(false);
   const [promptSaveFeedback, setPromptSaveFeedback] = useState("");
   const [promptSaveFeedbackTone, setPromptSaveFeedbackTone] = useState("");
+  const [skillSections, setSkillSections] = useState([]);
+  const [skillLoading, setSkillLoading] = useState(false);
+  const [skillError, setSkillError] = useState("");
+  const [skillSaving, setSkillSaving] = useState(false);
+  const [skillResetting, setSkillResetting] = useState(false);
+  const [skillSaveFeedback, setSkillSaveFeedback] = useState("");
+  const [skillSaveFeedbackTone, setSkillSaveFeedbackTone] = useState("");
   const [toolSections, setToolSections] = useState([]);
   const [toolLoading, setToolLoading] = useState(false);
   const [toolError, setToolError] = useState("");
@@ -1652,6 +1833,7 @@ function App() {
           ...current,
           ...(payload.ui_state || {}),
           showPromptModal: false,
+          showSkillModal: false,
           showHistoryModal: false,
           showToolModal: false,
           showArtifactModal: false,
@@ -1709,6 +1891,31 @@ function App() {
     }
   }
 
+  async function loadSkills() {
+    setSkillLoading(true);
+    setSkillError("");
+    try {
+      const response = await fetch("/api/demo/skills");
+      const payload = await parseApiResponse(response);
+      if (!response.ok) throw new Error(payload.error || "skill_load_failed");
+      const skills = Array.isArray(payload.skills) ? payload.skills : [];
+      setSkillSections(skills);
+      setUiState((current) => {
+        const nextId = current.activeSkillId || skills[0]?.id || "";
+        const matched = skills.find((item) => item.id === nextId) || skills[0];
+        return normalizeUiState({
+          ...current,
+          activeSkillId: nextId,
+          skillDraft: matched?.body || "",
+        });
+      });
+    } catch (loadError) {
+      setSkillError(`加载 skill 失败: ${loadError.message}`);
+    } finally {
+      setSkillLoading(false);
+    }
+  }
+
   async function loadTools() {
     setToolLoading(true);
     setToolError("");
@@ -1741,6 +1948,15 @@ function App() {
     }
   }
 
+  function openSkillCenter() {
+    setUiState((current) => normalizeUiState({ ...current, showSkillModal: true }));
+    setSkillSaveFeedback("");
+    setSkillSaveFeedbackTone("");
+    if (!skillSections.length && !skillLoading) {
+      void loadSkills();
+    }
+  }
+
   function openToolCenter() {
     setUiState((current) => normalizeUiState({ ...current, showToolModal: true }));
     setToolSaveFeedback("");
@@ -1765,6 +1981,15 @@ function App() {
     }, 1000);
     return () => window.clearTimeout(timer);
   }, [promptSaveFeedback, promptSaveFeedbackTone]);
+
+  useEffect(() => {
+    if (skillSaveFeedbackTone !== "success" || !skillSaveFeedback) return undefined;
+    const timer = window.setTimeout(() => {
+      setSkillSaveFeedback("");
+      setSkillSaveFeedbackTone("");
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [skillSaveFeedback, skillSaveFeedbackTone]);
 
   useEffect(() => {
     if (toolSaveFeedbackTone !== "success" || !toolSaveFeedback) return undefined;
@@ -1793,6 +2018,25 @@ function App() {
       });
     });
   }, [promptSections, uiState.activePromptId]);
+
+  useEffect(() => {
+    if (!skillSections.length) return;
+    const activeSkill = skillSections.find((item) => item.id === uiState.activeSkillId) || skillSections[0] || null;
+    if (!activeSkill) return;
+    setUiState((current) => {
+      const nextId = activeSkill.id;
+      const draftShouldUpdate =
+        current.activeSkillId !== nextId || !current.skillDraft || current.skillDraft === "";
+      if (current.activeSkillId === nextId && !draftShouldUpdate) {
+        return current;
+      }
+      return normalizeUiState({
+        ...current,
+        activeSkillId: nextId,
+        skillDraft: draftShouldUpdate ? activeSkill.body || "" : current.skillDraft,
+      });
+    });
+  }, [skillSections, uiState.activeSkillId]);
 
   useEffect(() => {
     if (!toolSections.length) return;
@@ -1863,6 +2107,38 @@ function App() {
     }
   }
 
+  async function handleSaveSkill() {
+    const activeSkill = skillSections.find((item) => item.id === uiState.activeSkillId);
+    if (!activeSkill || skillSaving || skillResetting) return;
+
+    setSkillSaving(true);
+    setSkillSaveFeedback("");
+    setSkillSaveFeedbackTone("");
+    try {
+      const response = await fetch("/api/demo/skills", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: activeSkill.id,
+          content: buildRawSkillDocument(activeSkill.frontmatter || {}, uiState.skillDraft),
+        }),
+      });
+      const payload = await parseApiResponse(response);
+      if (!response.ok) throw new Error(payload.error || "skill_update_failed");
+      const skills = Array.isArray(payload.skills) ? payload.skills : [];
+      setSkillSections(skills);
+      const matched = skills.find((item) => item.id === activeSkill.id) || payload.skill;
+      setUiState((current) => normalizeUiState({ ...current, skillDraft: matched?.body || current.skillDraft }));
+      setSkillSaveFeedback("保存成功，后续运行会使用新的 skill。");
+      setSkillSaveFeedbackTone("success");
+    } catch (saveError) {
+      setSkillSaveFeedback(`保存失败: ${saveError.message}`);
+      setSkillSaveFeedbackTone("error");
+    } finally {
+      setSkillSaving(false);
+    }
+  }
+
   async function handleResetPrompt() {
     const activePrompt = promptSections.find((item) => item.id === uiState.activePromptId);
     if (!activePrompt || promptSaving || promptResetting) return;
@@ -1889,6 +2165,35 @@ function App() {
       setPromptSaveFeedbackTone("error");
     } finally {
       setPromptResetting(false);
+    }
+  }
+
+  async function handleResetSkill() {
+    const activeSkill = skillSections.find((item) => item.id === uiState.activeSkillId);
+    if (!activeSkill || skillSaving || skillResetting) return;
+
+    setSkillResetting(true);
+    setSkillSaveFeedback("");
+    setSkillSaveFeedbackTone("");
+    try {
+      const response = await fetch("/api/demo/skills/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: activeSkill.id }),
+      });
+      const payload = await parseApiResponse(response);
+      if (!response.ok) throw new Error(payload.error || "skill_reset_failed");
+      const skills = Array.isArray(payload.skills) ? payload.skills : [];
+      setSkillSections(skills);
+      const matched = skills.find((item) => item.id === activeSkill.id) || payload.skill;
+      setUiState((current) => normalizeUiState({ ...current, skillDraft: matched?.body || "" }));
+      setSkillSaveFeedback("已恢复默认 skill。");
+      setSkillSaveFeedbackTone("success");
+    } catch (resetError) {
+      setSkillSaveFeedback(`恢复失败: ${resetError.message}`);
+      setSkillSaveFeedbackTone("error");
+    } finally {
+      setSkillResetting(false);
     }
   }
 
@@ -1939,6 +2244,8 @@ function App() {
         normalizeUiState({
           ...current,
           ...(payload.ui_state || {}),
+          showPromptModal: false,
+          showSkillModal: false,
           showHistoryModal: false,
         })
       );
@@ -1999,8 +2306,10 @@ function App() {
           ...DEFAULT_UI_STATE,
           theme: current.theme,
           activePromptId: current.activePromptId,
+          activeSkillId: current.activeSkillId,
           activeToolId: current.activeToolId,
           promptDraft: current.promptDraft,
+          skillDraft: current.skillDraft,
           showHistoryModal: false,
         })
       );
@@ -2390,15 +2699,17 @@ function App() {
     setError("");
     setHistory([]);
     setThreadId(createThreadId());
-    setUiState((current) =>
-      normalizeUiState({
-        ...DEFAULT_UI_STATE,
-        theme: current.theme,
-        activePromptId: current.activePromptId,
-        activeToolId: current.activeToolId,
-        promptDraft: current.promptDraft,
-      })
-    );
+      setUiState((current) =>
+        normalizeUiState({
+          ...DEFAULT_UI_STATE,
+          theme: current.theme,
+          activePromptId: current.activePromptId,
+          activeSkillId: current.activeSkillId,
+          activeToolId: current.activeToolId,
+          promptDraft: current.promptDraft,
+          skillDraft: current.skillDraft,
+        })
+      );
     setPendingUserFiles([]);
     setDemoState((current) => ({
       ...cloneBaseState(),
@@ -2505,6 +2816,15 @@ function App() {
         >
           <${BookText} className="h-4 w-4" />
           <span>提示词</span>
+        </button>
+        <button
+          type="button"
+          className=${`side-menu-button ${uiState.showSkillModal ? "is-active" : ""}`}
+          onClick=${openSkillCenter}
+          title="预览管理 Skill"
+        >
+          <${Sparkles} className="h-4 w-4" />
+          <span>Skill</span>
         </button>
         <button
           type="button"
@@ -2771,6 +3091,39 @@ function App() {
         saveFeedbackTone=${promptSaveFeedbackTone}
         saving=${promptSaving}
         resetting=${promptResetting}
+        readOnly=${loading}
+      />
+    </${Modal}>
+
+    <${Modal}
+      open=${uiState.showSkillModal}
+      title="管理 Skill 预览"
+      eyebrow="Skill 管理"
+      onClose=${() => setUiState((current) => normalizeUiState({ ...current, showSkillModal: false }))}
+      variant="prompt-center"
+    >
+      <${SkillCenter}
+        skills=${skillSections}
+        activeSkillId=${uiState.activeSkillId}
+        onSelect=${(nextSkillId) =>
+          setUiState((current) => {
+            const matched = skillSections.find((item) => item.id === nextSkillId) || null;
+            return normalizeUiState({
+              ...current,
+              activeSkillId: nextSkillId,
+              skillDraft: matched?.body || "",
+            });
+          })}
+        loading=${skillLoading}
+        error=${skillError}
+        draftContent=${uiState.skillDraft}
+        onDraftChange=${(nextDraft) => setUiState((current) => normalizeUiState({ ...current, skillDraft: nextDraft }))}
+        onSave=${handleSaveSkill}
+        onReset=${handleResetSkill}
+        saveFeedback=${skillSaveFeedback}
+        saveFeedbackTone=${skillSaveFeedbackTone}
+        saving=${skillSaving}
+        resetting=${skillResetting}
         readOnly=${loading}
       />
     </${Modal}>

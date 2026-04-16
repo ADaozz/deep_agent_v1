@@ -26,7 +26,7 @@
 3. `img/文件预览md.png` 和 `img/文件预览xlsx.png`
    - 分别展示文本类文件与表格类文件在前端的预览形态
 4. `img/提示词管理.png` 和 `img/工具控制.png`
-   - 分别展示提示词管理中心、Prompt Insert 标签和工具控制台
+   - 分别展示提示词管理中心、工具控制台，以及当前左侧控制栏的管理入口风格
 
 如果你的目标是先判断这个项目值不值得 clone，优先看 `Supervisor Conversation Runtime.html`。它比单张截图更能说明整个系统到底“怎么跑”。
 
@@ -98,7 +98,8 @@ Excel / 表格类文件预览：
 - 支持前端多轮对话
 - 支持 PostgreSQL 持久化会话历史、线程级 UI 状态与历史线程切换
 - 支持按 query 动态生成专属 worker
-- 支持前端提示词中心：预览、编辑、保存、恢复默认
+- 支持前端提示词管理中心：预览、编辑、保存、恢复默认
+- 支持前端 Skill 管理中心：与 prompt 分离管理，单独预览 YAML 头属性、正文编辑、保存与恢复默认
 - 支持将 `workspace/` 内文件发布为前端文件卡片，并在会话中预览 / 下载 / 文本类文件保存
 - 支持把生成结果直接作为会话内文件卡片展示，便于用户在一次运行结束后立刻查看 Markdown / 文本类 / 表格类产物
 - 支持 Markdown / Mermaid 格式的最终回答渲染
@@ -128,12 +129,19 @@ deep_agent_v1/
 │   ├── demo_session.py
 │   ├── logging_utils.py
 │   ├── prompts.py
+│   ├── skill_store.py
+│   ├── skills.py
 │   ├── workspace_files.py
 │   └── runner.py
 ├── frontend_demo/
 │   ├── app.js
 │   ├── index.html
 │   └── styles.css
+├── skill/
+│   ├── coding_principles/
+│   │   └── SKILL.md
+│   └── deep_research/
+│       └── SKILL.md
 ├── runtime_logs/
 ├── docker-compose.yaml
 ├── img/
@@ -155,8 +163,9 @@ deep_agent_v1/
 1. Agent 组装层
    - [builder.py](app/agent/builder.py)
    - [prompts.py](app/prompts.py)
+   - [skill_store.py](app/skill_store.py)
    - [todo_enforcer.py](app/agent/todo_enforcer.py)
-   - 负责根据 query 生成本轮 worker 名册、拼出 supervisor / worker 提示词、挂载中间件和工具
+   - 负责根据 query 生成本轮 worker 名册、拼出 supervisor / worker 提示词、按 query 注入 supervisor skill、挂载中间件和工具
 
 2. 执行层
    - `create_deep_agent(...)`
@@ -212,10 +221,20 @@ deep_agent_v1/
   - 当前包含 `ssh_execute(host_ip, command)`，只暴露给 worker，不暴露给 supervisor
 
 - `app/prompts.py`
-  - supervisor 与 worker 的提示词
-  - 约束“最终总结只能由 supervisor 完成”
-  - 约束动态 worker 只能处理叶子分片任务
-  - 明确远程检查、SSH、服务探测等落地执行必须先派发给 worker
+  - 只负责 prompt 本体
+  - 当前包括 `worker-planner`、`supervisor-system`、`evidence-todo`
+  - prompt 与 skill 已分离，不再把 skill 混在 prompt 存储里
+
+- `app/skill_store.py`
+  - 统一管理 supervisor skill
+  - 当前从 `skill/<skill_name>/SKILL.md` 加载 skill
+  - 负责 skill 的默认值、运行时热更新、恢复默认与 query 关键词命中
+  - 当前支持 `deep_research` 与 `coding_principles`
+
+- `app/skills.py`
+  - 负责解析 `SKILL.md`
+  - 使用 `python-frontmatter` 读取 YAML 头和正文
+  - 对 supervisor skill 做约束校验：`tool_type` 必须是 `none`，且不允许声明 `tool_list`
 
 - `app/demo_session.py`
   - Web Demo 的核心执行与状态收集器
@@ -232,7 +251,8 @@ deep_agent_v1/
   - `/api/demo/meta` 返回当前模型名
   - `/api/demo/run` 返回 NDJSON 流式状态快照
   - `/api/demo/history` / `/api/demo/history/threads` / `/api/demo/thread-state` 提供历史线程与 UI 状态持久化
-  - `/api/demo/prompts` / `/api/demo/prompts/reset` 提供提示词读取与热更新
+  - `/api/demo/prompts` / `/api/demo/prompts/reset` 提供 prompt 读取与热更新
+  - `/api/demo/skills` / `/api/demo/skills/reset` 提供 skill 读取与热更新
   - `/api/demo/workspace-file` 提供 `workspace/` 文件的预览、下载与文本类文件保存
 
 - `app/chat_history_store.py`
@@ -256,7 +276,7 @@ deep_agent_v1/
   - 负责流式消费 `/api/demo/run`
   - 负责多轮会话状态管理
   - 使用统一的 `uiState` 对象维护主题、输入框、当前弹窗、当前选中 agent / 文件等前端状态
-  - 支持历史会话侧栏、提示词中心、文件卡片与文件预览弹窗
+  - 支持历史会话侧栏、提示词管理中心、Skill 管理中心、工具控制台、文件卡片与文件预览弹窗
   - 负责渲染：
     - 顶部状态卡片
     - User Query
@@ -841,7 +861,7 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 
 左侧“提示词”按钮打开后，可以直接在前端：
 
-- 预览当前核心提示词
+- 预览当前核心 prompt
 - 编辑提示词
 - 保存提示词
 - 恢复默认提示词
@@ -850,7 +870,6 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 
 - 运行时 worker 规划器提示词
 - supervisor 系统提示词
-- Prompt Insert 动态插片，例如 `deepresearch-spec`
 - worker evidence todo 守卫提示词
 
 提示词保存是“进程内热更新”：
@@ -859,27 +878,48 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 - 对后续新任务立即生效
 - 但服务重启后仍会回到代码中的默认值
 
-### 3. Prompt Insert 动态插片
+### 3. Skill 管理中心
 
-`PROMPT_INSERTS/` 用于存放按场景动态加载的提示词插片。它们不是完整 system prompt，而是追加在 supervisor 底座提示词后面的场景增强块。
+`skill/<skill_name>/SKILL.md` 用于存放按场景动态加载的 skill。当前这套机制还很初步，主要先承载 supervisor 场景增强。
 
-注意：这个功能目前还只是实验性雏形，整体设计还没有完全构思好。当前后端只用了很简陋的关键词 / 字符串匹配来判断是否注入插片，主要用于验证 `deepresearch-spec` 这类 prompt insert 是否真的会影响运行效果。它还不是稳定的 prompt routing 方案。
+注意：这个功能目前还只是实验性雏形，整体设计还没有完全构思好。当前后端只用了很简陋的关键词 / 字符串匹配来判断是否注入 skill，主要用于验证 `deep_research` 这类 skill 是否真的会影响运行效果。它还不是稳定的 prompt routing 方案。
 
-当前内置插片：
+当前内置 skill：
 
-- [deepresearch-spec.md](PROMPT_INSERTS/deepresearch-spec.md)
+- [SKILL.md](skill/deep_research/SKILL.md)
   - 适用于争议性技术话题、事实核验、benchmark 解读、立场判断与趋势分析
   - 关注来源层级、语境、机制、代表性、可外推性与问题是否已被现实改写
+  - 当前作为 supervisor skill 使用，不绑定工具
   - 当 query 命中 `deepresearch`、事实核验、benchmark、趋势、争议、来源、证据、调研、研究等关键词时自动注入
 
-前端提示词管理中心会把这类提示词打上 `动态加载` / `Prompt Insert` 标签，用来和 `worker-planner`、`supervisor-system`、`evidence-todo` 这类内置提示词区分。
+- [SKILL.md](skill/coding_principles/SKILL.md)
+  - 适用于写代码、改代码、重构、工程化、代码评审等编码任务
+  - 强调先想清楚、最小改动、避免过度设计与可验证闭环
+  - 当前作为 supervisor skill 使用，不绑定工具
+  - 当 query 命中写代码、改代码、修改代码、重构、工程化、补类型、加日志、审代码等关键词时自动注入
+
+左侧“Skill”按钮打开后，可以直接在前端：
+
+- 单独查看 skill 列表，不和 prompt 混在一起
+- 查看 skill 类型标签，例如 `Supervisor Skill`
+- 预览 YAML 头属性
+- 直接编辑正文
+- 保存 skill
+- 恢复默认 skill
+
+当前 Skill 管理页的编辑模型是：
+
+- YAML 头属性默认以只读方式展示
+- 正文直接编辑
+- 保存时前端会把 YAML 头和正文重新拼成完整 `SKILL.md` 再提交给后端
 
 运行时行为：
 
-- 普通本地文件总结、代码解释、轻量问答不会加载 `deepresearch-spec`
-- 命中 DeepResearch 场景时，后端会在 supervisor system prompt 末尾追加 `# Scenario Insert: deepresearch-spec`
-- 该插片只增强研究判断框架，不替换 supervisor 的调度、工具边界、worker evidence checklist 等底座规则
-- 前端保存后的插片内容会在当前后端进程内热更新；重启服务后会重新从 `PROMPT_INSERTS/deepresearch-spec.md` 加载默认内容
+- 普通本地文件总结、代码解释、轻量问答不会加载 `deep_research`
+- 命中 DeepResearch 场景时，后端会在 supervisor system prompt 末尾追加 `# Supervisor Skill: deep_research`
+- 命中编码类场景时，后端会在 supervisor system prompt 末尾追加 `# Supervisor Skill: coding_principles`
+- 该 skill 只增强研究判断框架，不替换 supervisor 的调度、工具边界、worker evidence checklist 等底座规则
+- 前端保存后的 skill 内容会在当前后端进程内热更新；重启服务后会重新从 `skill/<skill_name>/SKILL.md` 加载默认内容
 
 ### 4. 文件产物卡片
 

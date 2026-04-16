@@ -26,6 +26,7 @@ from app.chat_history_store import (
 from app.config import load_settings
 from app.demo_session import run_demo_session_stream
 from app.prompts import get_prompt_sections, reset_prompt_section, update_prompt_section
+from app.skill_store import list_skill_sections, reset_skill_section, update_skill_section
 from app.tool_registry import (
     get_tool_control,
     list_active_tool_ids,
@@ -55,6 +56,12 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/demo/prompts/reset":
             self._handle_reset_prompt()
+            return
+        if self.path == "/api/demo/skills":
+            self._handle_update_skill()
+            return
+        if self.path == "/api/demo/skills/reset":
+            self._handle_reset_skill()
             return
         if self.path == "/api/demo/tools/toggle":
             self._handle_toggle_tool()
@@ -202,6 +209,57 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
             return
 
         self._send_json({"prompt": reset_prompt, "prompts": get_prompt_sections(max_rounds=12)}, status=HTTPStatus.OK)
+
+    def _handle_update_skill(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length) if content_length else b"{}"
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._send_json({"error": "invalid_json"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        skill_id = str(payload.get("id", "")).strip()
+        content = str(payload.get("content", ""))
+        if not skill_id:
+            self._send_json({"error": "skill_id_required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not content.strip():
+            self._send_json({"error": "skill_content_required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            updated = update_skill_section(skill_id=skill_id, content=content)
+        except KeyError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        self._send_json({"skill": updated, "skills": list_skill_sections()}, status=HTTPStatus.OK)
+
+    def _handle_reset_skill(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length) if content_length else b"{}"
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._send_json({"error": "invalid_json"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        skill_id = str(payload.get("id", "")).strip()
+        if not skill_id:
+            self._send_json({"error": "skill_id_required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            reset_skill = reset_skill_section(skill_id=skill_id)
+        except KeyError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        self._send_json({"skill": reset_skill, "skills": list_skill_sections()}, status=HTTPStatus.OK)
 
     def _handle_update_thread_state(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -356,6 +414,10 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/demo/prompts":
             settings = load_settings(argv=[])
             self._send_json({"prompts": get_prompt_sections(max_rounds=12), "model": settings.model})
+            return
+        if self.path == "/api/demo/skills":
+            settings = load_settings(argv=[])
+            self._send_json({"skills": list_skill_sections(), "model": settings.model})
             return
         if parsed.path == "/api/demo/tools":
             params = parse_qs(parsed.query)
