@@ -1,4 +1,4 @@
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 
@@ -24,6 +24,7 @@ import {
 
 let mermaidReady = false;
 let mermaidModulePromise = null;
+const artifactScrollMemory = new Map();
 
 async function loadMermaid() {
   if (!mermaidModulePromise) {
@@ -387,9 +388,87 @@ export const FilePreviewContent = {
   },
   setup(props) {
     const kind = computed(() => classifyArtifact(props.file));
-    return { kind, icons, formatFileSize };
+    const rootRef = ref(null);
+    let scrollContainer = null;
+
+    function currentFileKey() {
+      return props.file?.path || "";
+    }
+
+    function findScrollableElement() {
+      if (!rootRef.value) return null;
+      return rootRef.value.querySelector(
+        ".file-preview-markdown, .file-preview-code, .spreadsheet-table-wrap"
+      );
+    }
+
+    function persistScrollPosition() {
+      const key = currentFileKey();
+      if (!key || !scrollContainer) return;
+      artifactScrollMemory.set(key, {
+        top: scrollContainer.scrollTop,
+        left: scrollContainer.scrollLeft,
+      });
+    }
+
+    function handleScroll() {
+      persistScrollPosition();
+    }
+
+    function detachScrollContainer() {
+      if (!scrollContainer) return;
+      scrollContainer.removeEventListener("scroll", handleScroll);
+      scrollContainer = null;
+    }
+
+    async function attachScrollContainer() {
+      detachScrollContainer();
+      await nextTick();
+      scrollContainer = findScrollableElement();
+      if (!scrollContainer) return;
+      scrollContainer.addEventListener("scroll", handleScroll, { passive: true });
+      const saved = artifactScrollMemory.get(currentFileKey());
+      if (saved) {
+        scrollContainer.scrollTop = saved.top || 0;
+        scrollContainer.scrollLeft = saved.left || 0;
+      }
+    }
+
+    watch(
+      () => [
+        props.file?.path || "",
+        kind.value,
+        props.previewState?.loading || false,
+        props.previewState?.error || "",
+        props.previewState?.text || "",
+        props.previewState?.html || "",
+        props.previewState?.spreadsheet?.active_sheet_index ?? -1,
+        props.previewState?.spreadsheet?.sheets?.length ?? 0,
+      ],
+      () => {
+        attachScrollContainer();
+      },
+      { immediate: true, flush: "post" }
+    );
+
+    watch(
+      () => props.file?.path || "",
+      (nextPath, previousPath) => {
+        if (previousPath && previousPath !== nextPath) {
+          persistScrollPosition();
+        }
+      }
+    );
+
+    onBeforeUnmount(() => {
+      persistScrollPosition();
+      detachScrollContainer();
+    });
+
+    return { kind, icons, formatFileSize, rootRef };
   },
   template: `
+    <div ref="rootRef" class="file-preview-root">
     <div v-if="!file" class="empty-block">未选择文件。</div>
     <div v-else-if="kind === 'image'" class="file-preview-shell">
       <img class="file-preview-image" :src="file.preview_url" :alt="file.title || file.name" />
@@ -421,6 +500,7 @@ export const FilePreviewContent = {
           <div class="info-value">{{ formatFileSize(file.size) }}</div>
         </div>
       </div>
+    </div>
     </div>
   `,
 };

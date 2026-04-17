@@ -76,6 +76,7 @@ class AgentPanel:
     pregel_id: str | None = None
     guard_hits: int = 0
     last_guard_message: str = ""
+    worker_error: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -251,12 +252,13 @@ class DemoRunCollector:
         for node_name, node_data in data.items():
             if node_data is None:
                 continue
-            self._capture_guard_messages(ns, node_data)
-            self._capture_subagent_todos_from_updates(ns, node_data)
-            if not ns:
-                self._capture_main_tool_calls(node_data)
             if ns and ns[0].startswith("tools:"):
                 self._capture_subagent_binding(ns)
+            self._capture_guard_messages(ns, node_data)
+            self._capture_subagent_todos_from_updates(ns, node_data)
+            self._capture_subagent_error_from_updates(ns, node_data)
+            if not ns:
+                self._capture_main_tool_calls(node_data)
             if node_name == "tools":
                 self._capture_tool_results(source, ns, node_data)
 
@@ -366,6 +368,7 @@ class DemoRunCollector:
                 )
             agent.status = "pending"
             agent.current_task_title = description
+            agent.worker_error = {}
             self._push_log("scheduler", f"派发给 {agent_id}: {short_text(description, 120)}")
             self._write_event(
                 "task_dispatched",
@@ -495,7 +498,10 @@ class DemoRunCollector:
                 tool_call_id = getattr(msg, "tool_call_id", "")
                 agent_id = self.tool_call_to_agent.get(tool_call_id)
                 report_text = getattr(msg, "content", "")
-                failed = _report_indicates_system_failure(report_text)
+                structured_error = {}
+                if agent_id:
+                    structured_error = self._ensure_agent_panel(agent_id).worker_error
+                failed = bool(structured_error) or _report_indicates_system_failure(report_text)
                 blocked = (not failed) and _report_indicates_blocked_result(report_text)
                 if agent_id:
                     agent = self._ensure_agent_panel(agent_id)
@@ -511,6 +517,7 @@ class DemoRunCollector:
                         round_index=self._round_index_for_agent(agent_id),
                         status=agent.status,
                         report_preview=short_text(report_text, 280),
+                        worker_error=structured_error,
                     )
                 if self.active_round is not None:
                     self.active_round.reports.append(f"{agent_id}: {short_text(report_text, 160)}")
@@ -658,6 +665,7 @@ class DemoRunCollector:
             "completed_rounds": panel.rounds,
             "guard_hits": panel.guard_hits,
             "last_guard_message": panel.last_guard_message,
+            "worker_error": panel.worker_error,
         }
 
     def _file_to_dict(self, file: PublishedFile) -> dict[str, Any]:
@@ -805,6 +813,36 @@ class DemoRunCollector:
         if not agent_id:
             return
         self._ensure_agent_panel(agent_id).todo_list = _convert_agent_todos(agent_todos)
+
+    def _capture_subagent_error_from_updates(self, ns: tuple[str, ...], node_data: Any) -> None:
+        if not ns or not ns[0].startswith("tools:") or not isinstance(node_data, dict):
+            return
+        worker_error = node_data.get("worker_error")
+        if not isinstance(worker_error, dict):
+            return
+        agent_id = self.pregel_to_agent.get(ns[0].split(":", 1)[1])
+        if not agent_id:
+            return
+        normalized = {
+            "phase": str(worker_error.get("phase", "")).strip(),
+            "source": str(worker_error.get("source", "")).strip(),
+            "error_type": str(worker_error.get("error_type", "")).strip(),
+            "message": str(worker_error.get("message", "")).strip(),
+        }
+        agent = self._ensure_agent_panel(agent_id)
+        if agent.worker_error == normalized:
+            return
+        agent.worker_error = normalized
+        agent.status = "error"
+        detail = normalized.get("message") or normalized.get("error_type") or "未知异常"
+        self._push_log(agent.name, f"捕获到 worker 运行异常: {short_text(detail, 160)}")
+        self._write_event(
+            "agent_runtime_error",
+            source=agent.name,
+            agent_id=agent_id,
+            round_index=self._round_index_for_agent(agent_id),
+            worker_error=normalized,
+        )
 
     def _ensure_agent_panel(self, agent_id: str) -> AgentPanel:
         panel = self.agents.get(agent_id)

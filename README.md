@@ -430,7 +430,7 @@ flowchart LR
 10. worker 进入自己的子图后，必须先调用 `write_evidence_todos`
 11. worker 再调用框架内置工具或项目工具执行局部任务，并持续更新 evidence checklist
 12. checklist 全部满足后，worker 才能向 supervisor 回报
-13. collector 根据 worker 回报把状态归类为 `done / blocked / error`
+13. worker 中间件会先把真实运行异常写入结构化 `worker_error`，collector 再优先按它归类 `done / blocked / error`，关键词匹配只保留兼容兜底
 14. 当一轮所有派发任务收敛后，supervisor 决定是否继续下一轮，或直接生成最终回答
 15. collector 把真实运行状态实时转换成 NDJSON 快照推给前端
 16. 如果运行过程中生成了 `workspace/` 内的文件，supervisor 应调用 `publish_workspace_file`，前端会把它渲染为文件卡片
@@ -1074,6 +1074,7 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 - 图片 / PDF：预览、下载
 - Excel / CSV：以表格视图预览（支持 sheet 切换、行列头、基础网格能力）并下载
 - 其他二进制文件：显示文件信息并下载
+- 预览弹窗会按文件路径记住滚动位置，运行中 Action List / Worker / Log 更新时不会强制把阅读位置跳回文件开头
 
 另外，collector 还提供一个兜底：
 
@@ -1199,6 +1200,7 @@ python3 serve_demo.py --host 0.0.0.0 --port 8080
 - 公共 JSON 请求与上传统一经 `axios` 封装
 - 通过 NDJSON 流式更新页面
 - 最终回答支持 Markdown 和 Mermaid
+- 文件预览弹窗带滚动位置记忆，避免流式状态刷新打断阅读
 
 ## API 说明
 

@@ -39,6 +39,7 @@ class EvidenceTodo(TypedDict):
 
 class EvidencePlanningState(PlanningState[Any]):
     agent_todos: Annotated[NotRequired[list[EvidenceTodo]], OmitFromInput]
+    worker_error: Annotated[NotRequired[dict[str, str]], OmitFromInput]
 
 
 class EvidenceTodoItem(BaseModel):
@@ -140,12 +141,46 @@ class EvidenceTodoMiddleware(AgentMiddleware[EvidencePlanningState, Any, Any]):
             content_blocks = [{"type": "text", "text": get_evidence_todo_system_prompt()}]
         return handler(request.override(system_message=SystemMessage(content=content_blocks)))
 
+    def wrap_tool_call(
+        self,
+        request: Any,
+        handler: Any,
+    ) -> ToolMessage | Command[Any]:
+        try:
+            return handler(request)
+        except Exception as exc:  # pragma: no cover - runtime integration path
+            tool_name = ""
+            tool_call = getattr(request, "tool_call", None)
+            if isinstance(tool_call, dict):
+                tool_name = str(tool_call.get("name", "")).strip()
+            error_payload = _build_worker_error_payload(
+                phase="tool",
+                source=tool_name or "unknown_tool",
+                exc=exc,
+            )
+            tool_call_id = ""
+            if isinstance(tool_call, dict):
+                tool_call_id = str(tool_call.get("id", "")).strip()
+            return Command(
+                update={
+                    "worker_error": error_payload,
+                    "messages": [
+                        ToolMessage(
+                            content=json.dumps({"worker_error": error_payload}, ensure_ascii=False),
+                            tool_call_id=tool_call_id,
+                        )
+                    ],
+                }
+            )
+
     def after_agent(
         self,
         state: EvidencePlanningState,
         runtime: Any,
     ) -> dict[str, Any] | None:
         todos = state.get("agent_todos") or []
+        if state.get("worker_error"):
+            return None
         if not todos:
             return {
                 "messages": [
@@ -206,3 +241,13 @@ EvidenceTodoMiddleware.after_agent.__can_jump_to__ = ["model"]
 def _evidence_sounds_blocked(evidence: str) -> bool:
     lowered = evidence.lower()
     return any(indicator in lowered for indicator in BLOCKED_EVIDENCE_INDICATORS)
+
+
+def _build_worker_error_payload(*, phase: str, source: str, exc: Exception) -> dict[str, str]:
+    message = str(exc).strip() or exc.__class__.__name__
+    return {
+        "phase": phase,
+        "source": source,
+        "error_type": exc.__class__.__name__,
+        "message": message,
+    }

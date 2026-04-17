@@ -1700,6 +1700,14 @@ button {
   height: 100%;
 }
 
+.file-preview-root {
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+}
+
 .file-preview-shell,
 .file-preview-frame,
 .file-preview-image,
