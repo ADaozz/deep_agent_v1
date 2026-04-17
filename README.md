@@ -190,7 +190,7 @@ deep_agent_v1/
 
 用一条链概括就是：
 
-`用户 query -> build_agent_bundle(query) -> supervisor -> task 派发 -> worker 子图执行 -> collector 转状态/日志 -> 前端渲染`
+`用户 query -> bootstrap(skill 头披露/技能选择/任务理解) -> build_agent_bundle(query) -> supervisor -> task 派发 -> worker 子图执行 -> collector 转状态/日志 -> 前端渲染`
 
 ## 核心模块说明
 
@@ -198,8 +198,11 @@ deep_agent_v1/
 
 - `app/agent/builder.py`
   - 入口是 `build_agent_bundle(settings, query)`
-  - 先根据 query 规划本轮专属 worker，再拼出完整 `subagents`
+  - 先做 bootstrap：披露 supervisor skill YAML 头、选择命中 skill、生成 bootstrap task context
+  - 再根据 bootstrap 上下文规划本轮专属 worker，并拼出完整 `subagents`
+  - 当前策略下 supervisor 不直接执行叶子任务；简单任务也会回退成单 worker 执行
   - 为 supervisor 注入 `generate_subagents` 工具，用于获取本轮 worker 名册（名册的 id 是唯一允许的 `subagent_type`）
+  - 为 supervisor 注入 `inspect_supervisor_skills`，按“先 YAML 头、后全文”的方式渐进式披露 supervisor skills
   - supervisor 不挂载 `ssh_execute`；远程执行能力只给 worker
   - 选择 `filesystem` / `docker` backend，并统一把文件工具锚定到 `workspace/`
 
@@ -228,7 +231,7 @@ deep_agent_v1/
 - `app/skill_store.py`
   - 统一管理 supervisor skill
   - 当前从 `skill/<skill_name>/SKILL.md` 加载 skill
-  - 负责 skill 的默认值、运行时热更新、恢复默认与 query 关键词命中
+  - 负责 skill 的默认值、运行时热更新、恢复默认，以及 bootstrap 阶段的 skill 头/全文读取
   - 当前支持 `deep_research` 与 `coding_principles`
 
 - `app/skills.py`
@@ -298,24 +301,26 @@ deep_agent_v1/
 
 1. 前端把用户 query 和历史 `messages` 发给 `/api/demo/run`
 2. 后端先执行 `build_agent_bundle(settings, query)`
-3. `builder.py` 用模型规划本轮专属 worker，并把名册封装进 supervisor 可调用的 `generate_subagents` 工具
-4. 后端把“supervisor + 本轮 worker + backend + middleware”一起交给 `create_deep_agent(...)` 启动
-5. supervisor 进入第一轮推理，先调用 `write_todos` 建立主 `Action List`
-6. supervisor 调用 `generate_subagents` 获取本轮 worker 名册（含 planner_error）
-7. supervisor 根据主任务与名册，调用 `task` 把叶子分片派发给真实 worker（必须使用名册里返回的 id）
-8. `demo_session.py` 在看到 `task` 时创建 round，并把 `task -> agent -> round` 绑定起来
-9. worker 进入自己的子图后，必须先调用 `write_evidence_todos`
-10. worker 再调用框架内置工具或项目工具执行局部任务，并持续更新 evidence checklist
-11. checklist 全部满足后，worker 才能向 supervisor 回报
-12. collector 根据 worker 回报把状态归类为 `done / blocked / error`
-13. 当一轮所有派发任务收敛后，supervisor 决定是否继续下一轮，或直接生成最终回答
-14. collector 把真实运行状态实时转换成 NDJSON 快照推给前端
-15. 如果运行过程中生成了 `workspace/` 内的文件，supervisor 应调用 `publish_workspace_file`，前端会把它渲染为文件卡片
-16. 文本类文件可以在前端弹窗里预览、编辑、保存；二进制文件只展示元信息并下载
+3. `builder.py` 先做 bootstrap：披露 supervisor skill YAML 头、选出命中 skill、生成一份 `Bootstrap Task Context`
+4. `builder.py` 再用 `Bootstrap Task Context` 规划本轮专属 worker，并把名册封装进 supervisor 可调用的 `generate_subagents` 工具
+5. 后端把“supervisor + 本轮 worker + backend + middleware”一起交给 `create_deep_agent(...)` 启动
+6. supervisor 进入第一轮推理，先调用 `write_todos` 建立主 `Action List`
+7. supervisor 调用 `generate_subagents` 获取本轮 worker 名册（含 planner_error）
+8. supervisor 根据主任务与名册，调用 `task` 把叶子分片派发给真实 worker（必须使用名册里返回的 id）
+9. `demo_session.py` 在看到 `task` 时创建 round，并把 `task -> agent -> round` 绑定起来
+10. worker 进入自己的子图后，必须先调用 `write_evidence_todos`
+11. worker 再调用框架内置工具或项目工具执行局部任务，并持续更新 evidence checklist
+12. checklist 全部满足后，worker 才能向 supervisor 回报
+13. collector 根据 worker 回报把状态归类为 `done / blocked / error`
+14. 当一轮所有派发任务收敛后，supervisor 决定是否继续下一轮，或直接生成最终回答
+15. collector 把真实运行状态实时转换成 NDJSON 快照推给前端
+16. 如果运行过程中生成了 `workspace/` 内的文件，supervisor 应调用 `publish_workspace_file`，前端会把它渲染为文件卡片
+17. 文本类文件可以在前端弹窗里预览、编辑、保存；二进制文件只展示元信息并下载
 
 几个关键约束：
 
-- supervisor 的职责只有调度、决策、收敛，不负责代替 worker 做远程落地执行
+- supervisor 的职责只有调度、决策、收敛，不负责代替 worker 做任何叶子落地执行
+- 简单任务也不会回落给 supervisor，而是至少派发 1 个 worker
 - 最终总结只能由 supervisor 完成，不能再派一个 summarizer 类 worker
 - `blocked` 表示目标条件不满足、权限不足、目标不可达或信息拿不到
 - `error` 表示程序、工具、运行环境本身出错
@@ -807,6 +812,13 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 
 这个项目额外注入了以下工具 / 中间件能力：
 
+- `inspect_supervisor_skills`
+  - 不是框架默认工具
+  - 由 [supervisor_skill_inspector.py](app/tools/supervisor_skill_inspector.py) 提供
+  - 只暴露给 supervisor
+  - 先返回 supervisor skill 的 YAML 头摘要，再按需返回所选 skill 的完整正文
+  - 用于 bootstrap 阶段的 supervisor skill 渐进式披露
+
 - `generate_subagents`
   - 不是框架默认工具
   - 由 [subagent_roster.py](app/tools/subagent_roster.py) 提供
@@ -882,7 +894,7 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 
 `skill/<skill_name>/SKILL.md` 用于存放按场景动态加载的 skill。当前这套机制还很初步，主要先承载 supervisor 场景增强。
 
-注意：这个功能目前还只是实验性雏形，整体设计还没有完全构思好。当前后端只用了很简陋的关键词 / 字符串匹配来判断是否注入 skill，主要用于验证 `deep_research` 这类 skill 是否真的会影响运行效果。它还不是稳定的 prompt routing 方案。
+注意：这个功能目前还只是实验性雏形，整体设计还没有完全构思好。当前运行链路已经不再直接按 query 做硬编码关键词匹配，而是先披露 supervisor skill 的 YAML 头，再由 bootstrap 阶段选择要注入的 skill 全文。它依然不是稳定的 prompt routing 方案，但已经不是最初那种字符串匹配试验版。
 
 当前内置 skill：
 
@@ -890,13 +902,11 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
   - 适用于争议性技术话题、事实核验、benchmark 解读、立场判断与趋势分析
   - 关注来源层级、语境、机制、代表性、可外推性与问题是否已被现实改写
   - 当前作为 supervisor skill 使用，不绑定工具
-  - 当 query 命中 `deepresearch`、事实核验、benchmark、趋势、争议、来源、证据、调研、研究等关键词时自动注入
 
 - [SKILL.md](skill/coding_principles/SKILL.md)
   - 适用于写代码、改代码、重构、工程化、代码评审等编码任务
   - 强调先想清楚、最小改动、避免过度设计与可验证闭环
   - 当前作为 supervisor skill 使用，不绑定工具
-  - 当 query 命中写代码、改代码、修改代码、重构、工程化、补类型、加日志、审代码等关键词时自动注入
 
 左侧“Skill”按钮打开后，可以直接在前端：
 
@@ -915,9 +925,9 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 
 运行时行为：
 
-- 普通本地文件总结、代码解释、轻量问答不会加载 `deep_research`
-- 命中 DeepResearch 场景时，后端会在 supervisor system prompt 末尾追加 `# Supervisor Skill: deep_research`
-- 命中编码类场景时，后端会在 supervisor system prompt 末尾追加 `# Supervisor Skill: coding_principles`
+- bootstrap 阶段会先通过 `inspect_supervisor_skills` 风格的渐进式披露查看 supervisor skill YAML 头
+- 然后由 skill 选择器只挑出当前真正相关的 supervisor skill，并把这些 skill 全文注入最终 supervisor system prompt
+- 如果当前 query 不需要额外 supervisor skill，也允许一个都不注入
 - 该 skill 只增强研究判断框架，不替换 supervisor 的调度、工具边界、worker evidence checklist 等底座规则
 - 前端保存后的 skill 内容会在当前后端进程内热更新；重启服务后会重新从 `skill/<skill_name>/SKILL.md` 加载默认内容
 

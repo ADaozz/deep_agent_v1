@@ -30,6 +30,24 @@ class ToolDescriptor:
 
 PINNED_TOOL_DESCRIPTORS: tuple[ToolDescriptor, ...] = (
     ToolDescriptor(
+        id="inspect_supervisor_skills",
+        title="inspect_supervisor_skills",
+        subtitle="渐进式披露 supervisor skills 的只读工具。",
+        scope="supervisor",
+        source_path="app/tools/supervisor_skill_inspector.py",
+        function_name="make_inspect_supervisor_skills_tool",
+        summary="先看 supervisor skill 的 YAML 头，再按需展开全文。",
+        docstring=(
+            "Supervisor 专用工具。"
+            "默认先返回所有 supervisor skill 的 YAML 头摘要。"
+            "只有在确认当前 query 命中了某个 skill 后，才继续请求该 skill 的完整正文。"
+            "不要一次性展开全部 skill 正文。"
+        ),
+        pinned=True,
+        switchable=False,
+        runtime_symbol="make_inspect_supervisor_skills_tool",
+    ),
+    ToolDescriptor(
         id="generate_subagents",
         title="generate_subagents",
         subtitle="Supervisor 的本轮 worker 名册生成器。",
@@ -255,6 +273,10 @@ def load_runtime_tool_bundle() -> dict[str, Any]:
     active_worker_tool_ids = list_active_worker_tool_ids()
     custom_descriptors = sniff_custom_tool_descriptors()
     fixed_modules = {
+        "supervisor_skill_inspector": _load_module_from_path(
+            "_deep_agent_fixed_supervisor_skill_inspector",
+            "app/tools/supervisor_skill_inspector.py",
+        ),
         "subagent_roster": _load_module_from_path("_deep_agent_fixed_subagent_roster", "app/tools/subagent_roster.py"),
         "workspace_artifacts": _load_module_from_path("_deep_agent_fixed_workspace_artifacts", "app/tools/workspace_artifacts.py"),
         "todo_enforcer": _load_module_from_path("_deep_agent_fixed_todo_enforcer", "app/agent/todo_enforcer.py"),
@@ -268,6 +290,10 @@ def load_runtime_tool_bundle() -> dict[str, Any]:
     return {
         "active_tool_list": active_worker_tool_ids,
         "all_active_tool_list": list(active_tool_ids),
+        "inspect_supervisor_skills_factory": getattr(
+            fixed_modules["supervisor_skill_inspector"],
+            "make_inspect_supervisor_skills_tool",
+        ),
         "generate_subagents_factory": getattr(fixed_modules["subagent_roster"], "make_generate_subagents_tool"),
         "publish_workspace_file": getattr(fixed_modules["workspace_artifacts"], "publish_workspace_file"),
         "evidence_todo_middleware": getattr(fixed_modules["todo_enforcer"], "EvidenceTodoMiddleware"),

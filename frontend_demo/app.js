@@ -1050,11 +1050,6 @@ function SessionTranscript({ session, error, onOpenAgent, onOpenFile }) {
               title=${isSupervisorOnlyRun ? "任务追踪 / Supervisor Checklist" : "任务追踪"}
               meta=${`${completedCount}/${state.tasks.length || 0} completed`}
             />
-            ${
-              isSupervisorOnlyRun
-                ? html`<div className="note-block">当前判断为可独立完成任务，本轮由 Supervisor 直接执行；这里的 Action List 就是 Supervisor 的执行 checklist。</div>`
-                : null
-            }
             <${TaskList} tasks=${state.tasks} />
           </${ChatBubble}>`
         : null

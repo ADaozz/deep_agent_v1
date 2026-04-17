@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+from typing import Any
 
-from app.skills import Skill, load_skill, load_skill_text
+from app.skills import Skill, load_skill_text
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -40,15 +41,6 @@ def _load_runtime_skill(*, skill_id: str, raw_text: str | None = None) -> Skill:
         runtime_target="supervisor",
         source_path=SUPERVISOR_SKILL_PATHS[skill_id],
     )
-
-
-def _query_hits_keywords(query: str | None, *, keywords: tuple[str, ...]) -> bool:
-    normalized = (query or "").strip().lower()
-    if not normalized:
-        return False
-    return any(keyword in normalized for keyword in keywords)
-
-
 def _build_skill_section(*, skill_id: str) -> dict[str, object]:
     skill = _load_runtime_skill(skill_id=skill_id)
     meta = SUPERVISOR_SKILL_CONFIGS[skill_id]
@@ -66,8 +58,45 @@ def _build_skill_section(*, skill_id: str) -> dict[str, object]:
     }
 
 
+def _build_skill_header_payload(*, skill_id: str) -> dict[str, Any]:
+    skill = _load_runtime_skill(skill_id=skill_id)
+    meta = SUPERVISOR_SKILL_CONFIGS[skill_id]
+    return {
+        "id": skill_id,
+        "name": skill.name,
+        "description": skill.description,
+        "tool_type": skill.tool_type.value,
+        "route_note": meta["route_note"],
+        "source": meta["source"],
+        "frontmatter": deepcopy(skill.metadata),
+    }
+
+
 def list_skill_sections() -> list[dict[str, object]]:
     return [_build_skill_section(skill_id=skill_id) for skill_id in SUPERVISOR_SKILL_ORDER]
+
+
+def list_supervisor_skill_headers() -> list[dict[str, Any]]:
+    return [_build_skill_header_payload(skill_id=skill_id) for skill_id in SUPERVISOR_SKILL_ORDER]
+
+
+def get_supervisor_skill(skill_id: str) -> dict[str, object]:
+    normalized_id = skill_id.strip()
+    if normalized_id not in _SUPERVISOR_SKILL_STORE:
+        raise KeyError(f"unknown_skill_id: {normalized_id}")
+    return _build_skill_section(skill_id=normalized_id)
+
+
+def normalize_supervisor_skill_ids(skill_ids: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_skill_id in skill_ids or []:
+        skill_id = str(raw_skill_id).strip()
+        if not skill_id or skill_id in seen or skill_id not in _SUPERVISOR_SKILL_STORE:
+            continue
+        seen.add(skill_id)
+        normalized.append(skill_id)
+    return normalized
 
 
 def update_skill_section(*, skill_id: str, content: str) -> dict[str, object]:
@@ -92,12 +121,10 @@ def reset_skill_section(*, skill_id: str) -> dict[str, object]:
     return _build_skill_section(skill_id=normalized_id)
 
 
-def build_supervisor_skill_prompt_suffix(*, query: str | None) -> str:
+def build_supervisor_skill_prompt_suffix(*, skill_ids: list[str] | None) -> str:
     blocks: list[str] = []
-    for skill_id in SUPERVISOR_SKILL_ORDER:
+    for skill_id in normalize_supervisor_skill_ids(skill_ids):
         skill = _load_runtime_skill(skill_id=skill_id)
-        if not _query_hits_keywords(query, keywords=tuple(skill.route_keywords)):
-            continue
         config = SUPERVISOR_SKILL_CONFIGS[skill_id]
         blocks.append(
             f"# Supervisor Skill: {skill_id}\n\n"

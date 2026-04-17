@@ -24,7 +24,7 @@ def make_generate_subagents_tool(
     roster_payload = {
         "query": query,
         "delegation_needed": bool(workers),
-        "reasoning": reasoning.strip() or ("当前 query 适合派发专属 worker。" if workers else "当前 query 无需额外 worker。"),
+        "reasoning": reasoning.strip() or "当前 query 适合派发专属 worker。",
         "planner_error": planner_error.strip(),
         "workers": [
             {
@@ -45,7 +45,7 @@ def make_generate_subagents_tool(
 
         何时使用：
         - 仅 supervisor 使用。
-        - 已经完成主 Action List，且判断当前任务不适合由 supervisor 独立完成。
+        - 已经完成主 Action List，并准备进入 worker 执行路径。
         - 需要确认本轮可以派发给哪些 worker。
 
         使用规则：
@@ -53,7 +53,7 @@ def make_generate_subagents_tool(
         - 不要猜测、编造或复用历史 worker 名称。
         - 工具返回 JSON，其中 workers[*].id 是后续 task.subagent_type 唯一允许使用的值。
         - workers[*].scope 描述该 worker 的对象、维度或边界，派发任务时必须遵守。
-        - 如果 workers 为空，说明本轮没有可派发 worker，应由 supervisor 继续处理或向用户说明限制。
+        - 正常情况下 workers 不应为空；如果为空，说明运行时 worker 规划链路出现异常。
 
         输入：
         - `task_breakdown`：当前已拆解出的任务列表或简要分片说明，用于核对 worker 覆盖范围。

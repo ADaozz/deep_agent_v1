@@ -296,6 +296,8 @@ class DemoRunCollector:
                     agent_id = self.pregel_to_agent.get(ns[0].split(":", 1)[1])
                     if agent_id:
                         self.agents[agent_id].todo_list = todos
+            if agent_id and tool_name == "write_file":
+                self._capture_written_workspace_file(content, source=agent_name, agent_id=agent_id)
             if tool_name == "publish_workspace_file":
                 self._capture_published_file(content)
             self._push_log(agent_name, f"{tool_name} => {short_text(content, 160)}")
@@ -727,6 +729,39 @@ class DemoRunCollector:
             self.files[published.path] = published
             self._push_log("scheduler", f"根据最终答复自动补发布文件产物: {published.path}")
 
+    def _capture_written_workspace_file(self, content: Any, *, source: str, agent_id: str) -> None:
+        relative_path = _parse_written_workspace_file_path(content)
+        if not relative_path or relative_path in self.files:
+            return
+        try:
+            payload = build_workspace_file_card(relative_path)
+        except Exception:
+            return
+        published = PublishedFile(
+            id=payload["id"],
+            path=payload["path"],
+            name=payload["name"],
+            title=payload["title"],
+            extension=payload["extension"],
+            size=payload["size"],
+            updated_at=payload["updated_at"],
+            mime_type=payload["mime_type"],
+            preview_url=payload["preview_url"],
+            preview_json_url=payload["preview_json_url"],
+            download_url=payload["download_url"],
+        )
+        self.files[published.path] = published
+        self._push_log(source, f"检测到 worker 生成文件产物: {published.path}")
+        self._write_event(
+            "workspace_file_detected",
+            source=source,
+            agent_id=agent_id,
+            path=published.path,
+            title=published.title,
+            mime_type=published.mime_type,
+            size=published.size,
+        )
+
     def _capture_guard_messages(self, ns: tuple[str, ...], node_data: dict[str, Any]) -> None:
         if not ns or not ns[0].startswith("tools:"):
             return
@@ -860,7 +895,7 @@ def run_demo_session(
 ) -> dict[str, Any]:
     os.makedirs(os.path.dirname(settings.log_file) or ".", exist_ok=True)
     effective_query = (agent_query or query).strip()
-    agent, runtime_catalog = build_agent_bundle(settings=settings, query=effective_query)
+    agent, runtime_catalog, _bootstrap_meta = build_agent_bundle(settings=settings, query=effective_query)
     collector = DemoRunCollector(log_file=settings.log_file, runtime_catalog=runtime_catalog)
     collector.status = "running"
     collector.log_session_start(query=query, max_rounds=max_rounds, model=settings.model, mode="sync")
@@ -918,7 +953,8 @@ def run_demo_session_stream(
 
         bootstrap_logs = [
             "正在加载配置、提示词与会话上下文。",
-            "正在准备运行时 worker 名册与调度规则。",
+            "正在披露 supervisor skill YAML 头并选择命中 skill。",
+            "正在基于命中的 supervisor skill 准备运行时 worker 名册与调度规则。",
             "正在构建 supervisor、工具链与执行后端。",
         ]
         for message in bootstrap_logs:
@@ -928,9 +964,32 @@ def run_demo_session_stream(
             if bootstrap_event:
                 yield bootstrap_event
 
-        agent, runtime_catalog = build_agent_bundle(settings=settings, query=effective_query)
+        agent, runtime_catalog, bootstrap_meta = build_agent_bundle(settings=settings, query=effective_query)
         collector.runtime_catalog = list(runtime_catalog)
         collector.runtime_catalog_by_id = {item["id"]: item for item in runtime_catalog}
+        selected_skill_ids = bootstrap_meta.get("selected_skill_ids") or []
+        if selected_skill_ids:
+            collector._push_log(
+                "scheduler",
+                f"bootstrap 阶段已命中 supervisor skills: {', '.join(selected_skill_ids)}",
+            )
+        elif bootstrap_meta.get("skill_selection_error"):
+            collector._push_log(
+                "scheduler",
+                f"bootstrap supervisor skill 选择失败，回退为空: {short_text(str(bootstrap_meta['skill_selection_error']), 180)}",
+            )
+        else:
+            collector._push_log("scheduler", "bootstrap 阶段未命中额外 supervisor skill。")
+        if bootstrap_meta.get("bootstrap_task_error"):
+            collector._push_log(
+                "scheduler",
+                f"bootstrap 任务理解失败，回退为空: {short_text(str(bootstrap_meta['bootstrap_task_error']), 180)}",
+            )
+        elif (bootstrap_meta.get("bootstrap_task_profile") or {}).get("objective"):
+            collector._push_log(
+                "scheduler",
+                f"bootstrap 任务理解完成: {short_text(str(bootstrap_meta['bootstrap_task_profile']['objective']), 120)}",
+            )
         collector._push_log("scheduler", "执行环境准备完成，开始进入 agent 流式执行阶段。")
 
         prepared = collector.build_payload(query=query, max_rounds=max_rounds, final=False)
@@ -1220,6 +1279,27 @@ def _extract_workspace_paths(text: str) -> list[str]:
         seen.add(path)
         normalized.append(path)
     return normalized
+
+
+def _parse_written_workspace_file_path(content: Any) -> str:
+    text = str(content or "").strip()
+    if not text:
+        return ""
+    match = re.search(
+        r"(?:Updated|Created|Wrote)\s+file\s+[`\"']?(?P<path>/?(?:workspace/)?[^\s`\"']+)[`\"']?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    path = match.group("path").strip()
+    if path.startswith("/workspace/"):
+        path = path[len("/workspace/") :]
+    elif path.startswith("workspace/"):
+        path = path[len("workspace/") :]
+    else:
+        path = path.lstrip("/")
+    return path
 
 
 def _convert_agent_todos(todos: list[dict[str, Any]]) -> list[dict[str, str]]:

@@ -16,6 +16,11 @@ from app.prompts import (
     build_supervisor_system_prompt,
     get_runtime_worker_planner_prompt,
 )
+from app.skill_store import (
+    build_supervisor_skill_prompt_suffix,
+    list_supervisor_skill_headers,
+    normalize_supervisor_skill_ids,
+)
 from app.tool_registry import load_runtime_tool_bundle
 
 
@@ -51,6 +56,25 @@ class RuntimeWorkerPlan(BaseModel):
         default_factory=list,
         description="当前 query 需要准备的本轮专属 worker 列表。",
     )
+
+
+class SupervisorSkillSelection(BaseModel):
+    skill_ids: list[str] = Field(
+        default_factory=list,
+        description="当前 query 命中的 supervisor skill id 列表。",
+    )
+    reasoning: str = Field(
+        default="",
+        description="为什么这些 supervisor skill 与当前 query 相关。",
+    )
+
+
+class BootstrapTaskProfile(BaseModel):
+    objective: str = Field(default="", description="对当前任务目标的简明理解。")
+    constraints: list[str] = Field(default_factory=list, description="执行约束。")
+    expected_deliverables: list[str] = Field(default_factory=list, description="预期产物。")
+    decomposition_axes: list[str] = Field(default_factory=list, description="如果要拆分，最自然的拆分维度。")
+    reasoning: str = Field(default="", description="当前任务为什么会落入这类执行路径。")
 
 
 def _build_subagent_spec(
@@ -111,25 +135,43 @@ def get_subagent_specs(runtime_tools: dict[str, Any]) -> list[dict[str, Any]]:
 
 def build_agent(settings: Settings, query: str | None = None):
     runtime_query = (query or settings.prompt).strip()
-    agent, _ = build_agent_bundle(settings, query=runtime_query)
+    agent, _, _ = build_agent_bundle(settings, query=runtime_query)
     return agent
 
 
 def build_agent_bundle(
     settings: Settings,
     query: str | None = None,
-) -> tuple[Any, list[dict[str, str]]]:
+) -> tuple[Any, list[dict[str, str]], dict[str, Any]]:
     runtime_query = (query or settings.prompt).strip()
     model = _make_model(settings)
     runtime_tools = load_runtime_tool_bundle()
+    selected_skill_ids, skill_selection_reasoning, skill_selection_error = _select_supervisor_skill_ids(
+        model=model,
+        query=runtime_query,
+    )
+    supervisor_skill_context = build_supervisor_skill_prompt_suffix(skill_ids=selected_skill_ids)
+    bootstrap_task_profile, bootstrap_task_error = _build_bootstrap_task_profile(
+        model=model,
+        query=runtime_query,
+        supervisor_skill_context=supervisor_skill_context,
+    )
+    bootstrap_task_context = _render_bootstrap_task_context(bootstrap_task_profile)
     runtime_specs, roster_payload = _build_runtime_subagent_specs(
         model=model,
         query=runtime_query,
         runtime_tools=runtime_tools,
+        supervisor_skill_context=supervisor_skill_context,
+        bootstrap_task_context=bootstrap_task_context,
     )
     runtime_catalog = roster_payload["workers"]
-    system_prompt = build_supervisor_system_prompt(max_rounds=12, query=runtime_query)
+    system_prompt = build_supervisor_system_prompt(
+        max_rounds=12,
+        selected_skill_ids=selected_skill_ids,
+        bootstrap_task_context=bootstrap_task_context,
+    )
     agent_tools: list[Any] = []
+    agent_tools.append(runtime_tools["inspect_supervisor_skills_factory"]())
     agent_tools.append(
         runtime_tools["generate_subagents_factory"](
             query=runtime_query,
@@ -160,7 +202,16 @@ def build_agent_bundle(
         name="supervisor",
         debug=True,
     )
-    return agent, runtime_catalog
+    return agent, runtime_catalog, {
+        "selected_skill_ids": selected_skill_ids,
+        "selected_skill_headers": [
+            header for header in list_supervisor_skill_headers() if header["id"] in set(selected_skill_ids)
+        ],
+        "skill_selection_reasoning": skill_selection_reasoning,
+        "skill_selection_error": skill_selection_error,
+        "bootstrap_task_profile": bootstrap_task_profile.model_dump(),
+        "bootstrap_task_error": bootstrap_task_error,
+    }
 
 
 def _build_runtime_subagent_specs(
@@ -168,12 +219,21 @@ def _build_runtime_subagent_specs(
     model: ChatOpenAI,
     query: str,
     runtime_tools: dict[str, Any],
+    supervisor_skill_context: str,
+    bootstrap_task_context: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     base_specs = get_subagent_specs(runtime_tools)
     runtime_plan = _plan_query_workers(
         model=model,
         query=query,
+        supervisor_skill_context=supervisor_skill_context,
+        bootstrap_task_context=bootstrap_task_context,
         existing_specs=base_specs,
+    )
+    runtime_plan = _ensure_non_empty_worker_plan(
+        runtime_plan=runtime_plan,
+        query=query,
+        bootstrap_task_context=bootstrap_task_context,
     )
     auto_worker_specs = _build_auto_worker_specs(
         runtime_plan=runtime_plan,
@@ -198,6 +258,8 @@ def _plan_query_workers(
     *,
     model: ChatOpenAI,
     query: str,
+    supervisor_skill_context: str,
+    bootstrap_task_context: str,
     existing_specs: list[dict[str, Any]],
 ) -> RuntimeWorkerPlan:
     planner = model.with_structured_output(RuntimeWorkerPlan, include_raw=True)
@@ -205,6 +267,8 @@ def _plan_query_workers(
         result = planner.invoke(
             get_runtime_worker_planner_prompt().format(
                 query=query,
+                supervisor_skill_context=supervisor_skill_context.strip() or "无",
+                bootstrap_task_context=bootstrap_task_context.strip() or "无",
             )
         )
     except Exception as exc:
@@ -228,6 +292,138 @@ def _plan_query_workers(
         planner_error=_format_planner_error(result["parsing_error"]),
         workers=[],
     )
+
+
+def _select_supervisor_skill_ids(
+    *,
+    model: ChatOpenAI,
+    query: str,
+) -> tuple[list[str], str, str]:
+    skill_headers = list_supervisor_skill_headers()
+    if not skill_headers:
+        return [], "", ""
+
+    selector = model.with_structured_output(SupervisorSkillSelection, include_raw=True)
+    prompt = _build_supervisor_skill_selector_prompt(query=query, skill_headers=skill_headers)
+    try:
+        result = selector.invoke(prompt)
+    except Exception as exc:
+        return [], "", _format_planner_error(exc)
+
+    parsed = result.get("parsed")
+    if parsed is not None:
+        selected_ids = normalize_supervisor_skill_ids(parsed.skill_ids)
+        return selected_ids, parsed.reasoning.strip(), ""
+
+    raw = result.get("raw")
+    try:
+        content = getattr(raw, "content", None) or ""
+        payload = json.loads(content) if isinstance(content, str) else content
+        if isinstance(payload, dict):
+            selected_ids = normalize_supervisor_skill_ids(payload.get("skill_ids") or [])
+            reasoning = str(payload.get("reasoning") or "").strip()
+            return selected_ids, reasoning, ""
+    except Exception:
+        pass
+
+    return [], "", _format_planner_error(result.get("parsing_error") or Exception("skill_selector_parsing_failed"))
+
+
+def _build_supervisor_skill_selector_prompt(*, query: str, skill_headers: list[dict[str, Any]]) -> str:
+    headers_json = json.dumps(skill_headers, ensure_ascii=False, indent=2)
+    return (
+        "# Supervisor Skill Selector\n\n"
+        "你正在做 bootstrap 阶段的 supervisor skill 选择。\n"
+        "这一步只允许查看 supervisor skill 的 YAML 头摘要，不允许直接假设 skill 全文内容。\n\n"
+        "## 当前用户 query\n"
+        f"{query}\n\n"
+        "## 可用的 supervisor skill YAML 头摘要\n"
+        f"{headers_json}\n\n"
+        "## 任务\n"
+        "从给定 skill 里挑出真正与当前 query 直接相关的 supervisor skill id。"
+        "如果没有命中，就返回空数组。\n\n"
+        "## 输出要求\n"
+        "你必须返回纯 JSON 对象，且能被 json.loads 直接解析。\n"
+        "返回字段：\n"
+        '- "skill_ids": list[str]\n'
+        '- "reasoning": str\n\n'
+        "规则：\n"
+        "- 只根据 query 与 YAML 头字段判断，不要臆造 skill 全文。\n"
+        "- 允许命中多个 skill，但不要为求稳把所有 skill 都选上。\n"
+        "- 如果 query 只是普通本地问题且不需要额外 supervisor 指南，就返回空数组。\n"
+    )
+
+
+def _build_bootstrap_task_profile(
+    *,
+    model: ChatOpenAI,
+    query: str,
+    supervisor_skill_context: str,
+) -> tuple[BootstrapTaskProfile, str]:
+    profiler = model.with_structured_output(BootstrapTaskProfile, include_raw=True)
+    prompt = _build_bootstrap_task_profile_prompt(
+        query=query,
+        supervisor_skill_context=supervisor_skill_context,
+    )
+    try:
+        result = profiler.invoke(prompt)
+    except Exception as exc:
+        return BootstrapTaskProfile(), _format_planner_error(exc)
+
+    parsed = result.get("parsed")
+    if parsed is not None:
+        return parsed, ""
+
+    raw = result.get("raw")
+    try:
+        content = getattr(raw, "content", None) or ""
+        payload = json.loads(content) if isinstance(content, str) else content
+        if isinstance(payload, dict):
+            return BootstrapTaskProfile(**payload), ""
+    except Exception:
+        pass
+
+    return BootstrapTaskProfile(), _format_planner_error(result.get("parsing_error") or Exception("bootstrap_task_profile_parsing_failed"))
+
+
+def _build_bootstrap_task_profile_prompt(*, query: str, supervisor_skill_context: str) -> str:
+    return (
+        "# Bootstrap Task Profiler\n\n"
+        "你正在做最终 supervisor 启动前的 bootstrap 阶段任务理解。\n\n"
+        "## 当前用户 query\n"
+        f"{query}\n\n"
+        "## 已命中的 supervisor skills 全文\n"
+        f"{supervisor_skill_context.strip() or '无'}\n\n"
+        "## 任务\n"
+        "基于 query 与已命中的 supervisor skills，总结本轮任务目标、约束、预期产物以及自然拆分维度。"
+        "这份结果会同时提供给后续 worker planner 与最终 supervisor。\n\n"
+        "## 输出要求\n"
+        "你必须返回纯 JSON 对象，且能被 json.loads 直接解析。\n"
+        "返回字段：\n"
+        '- "objective": str\n'
+        '- "constraints": list[str]\n'
+        '- "expected_deliverables": list[str]\n'
+        '- "decomposition_axes": list[str]\n'
+        '- "reasoning": str\n'
+    )
+
+
+def _render_bootstrap_task_context(profile: BootstrapTaskProfile) -> str:
+    chunks: list[str] = []
+    if profile.objective.strip():
+        chunks.append(f"- 任务目标：{profile.objective.strip()}")
+    if profile.constraints:
+        chunks.append("- 执行约束：")
+        chunks.extend(f"  - {item}" for item in profile.constraints if str(item).strip())
+    if profile.expected_deliverables:
+        chunks.append("- 预期产物：")
+        chunks.extend(f"  - {item}" for item in profile.expected_deliverables if str(item).strip())
+    if profile.decomposition_axes:
+        chunks.append("- 自然拆分维度：")
+        chunks.extend(f"  - {item}" for item in profile.decomposition_axes if str(item).strip())
+    if profile.reasoning.strip():
+        chunks.append(f"- 执行路径理解：{profile.reasoning.strip()}")
+    return "\n".join(chunks).strip()
 
 
 def _try_recover_worker_plan(result: dict[str, Any]) -> RuntimeWorkerPlan | None:
@@ -317,7 +513,73 @@ def _build_roster_reasoning(
     base_reasoning = runtime_plan.reasoning.strip()
     if auto_worker_specs:
         return base_reasoning or "当前 query 已生成一组本轮专属 worker。"
-    return base_reasoning or "当前 query 不需要额外 worker，可由 supervisor 直接处理。"
+    return base_reasoning or "当前 query 已回退为单 worker 执行。"
+
+
+def _ensure_non_empty_worker_plan(
+    *,
+    runtime_plan: RuntimeWorkerPlan,
+    query: str,
+    bootstrap_task_context: str,
+) -> RuntimeWorkerPlan:
+    if runtime_plan.delegation_needed and runtime_plan.workers:
+        return runtime_plan
+
+    fallback_worker = _build_single_worker_def(
+        query=query,
+        bootstrap_task_context=bootstrap_task_context,
+    )
+    fallback_reasoning = runtime_plan.reasoning.strip() or "当前配置要求 supervisor 不直接执行叶子任务，已自动回退为单 worker 执行。"
+    planner_error = runtime_plan.planner_error.strip()
+    if planner_error:
+        fallback_reasoning = f"{fallback_reasoning} worker planner 原始异常：{planner_error}"
+    return RuntimeWorkerPlan(
+        delegation_needed=True,
+        complexity=runtime_plan.complexity or "low",
+        reasoning=fallback_reasoning,
+        planner_error=planner_error,
+        workers=[fallback_worker],
+    )
+
+
+def _build_single_worker_def(
+    *,
+    query: str,
+    bootstrap_task_context: str,
+) -> RuntimeWorkerDef:
+    scope = _extract_single_worker_scope(bootstrap_task_context) or short_text_for_worker_scope(query)
+    return RuntimeWorkerDef(
+        name=_fallback_single_worker_name(query),
+        display_name="Task Worker",
+        scope=scope,
+        role="负责当前任务的单 worker 执行",
+        description="用于承接当前 query 的单一执行分片；当任务没有自然并行拆分时，由它独立完成落地执行。",
+        system_prompt=_default_worker_system_prompt(),
+    )
+
+
+def _extract_single_worker_scope(bootstrap_task_context: str) -> str:
+    for line in bootstrap_task_context.splitlines():
+        normalized = line.strip()
+        if normalized.startswith("- 任务目标："):
+            return normalized.removeprefix("- 任务目标：").strip()
+    return ""
+
+
+def short_text_for_worker_scope(query: str, limit: int = 80) -> str:
+    text = re.sub(r"\s+", " ", query.strip())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _fallback_single_worker_name(query: str) -> str:
+    normalized = _normalize_agent_name(query)
+    parts = [part for part in normalized.split("_") if part][:4]
+    candidate = "_".join(parts) if parts else "task_worker"
+    if not candidate or candidate[0].isdigit():
+        candidate = f"task_{candidate or 'worker'}"
+    return candidate
 
 
 def _format_planner_error(exc: Exception) -> str:
