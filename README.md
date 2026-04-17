@@ -132,6 +132,7 @@ deep_agent_v1/
 │   ├── prompts.py
 │   ├── skill_store.py
 │   ├── skills.py
+│   ├── tool_registry.py
 │   ├── workspace_files.py
 │   └── runner.py
 ├── frontend_demo/
@@ -162,6 +163,7 @@ deep_agent_v1/
 │   └── deep_research/
 │       └── SKILL.md
 ├── runtime_logs/
+├── result/
 ├── docker-compose.yaml
 ├── img/
 ├── postgres/
@@ -211,27 +213,42 @@ deep_agent_v1/
 
 用一条链概括就是：
 
-`用户 query -> bootstrap(skill 头披露/技能选择/任务理解) -> build_agent_bundle(query) -> supervisor -> task 派发 -> worker 子图执行 -> collector 转状态/日志 -> 前端渲染`
+`用户 query -> 前端请求 demo_server -> demo_session 收集流式状态 -> builder bootstrap/组图 -> supervisor -> task 派发 -> worker 执行 -> collector 转状态/日志 -> 前端渲染`
 
-下面这张 Mermaid 图把当前项目里最关键的运行链路、前后端边界和持久化关系串起来：
+如果启用了 Docker backend，需要额外补上这一层执行语义：
+
+- Web 服务、session collector、PostgreSQL 持久化都运行在宿主机进程里
+- 文件工具始终锚定仓库下的 `workspace/`
+- 只有 `execute` 会通过 `docker exec` 进入容器
+- 宿主机 `./workspace` 会挂载到容器内 `/workspace`
+
+下面这张 Mermaid 图把当前项目里最关键的运行链路、Docker 沙箱边界和 `workspace -> /workspace` 映射关系一起串起来：
 
 ```mermaid
 flowchart LR
     user[用户 / Browser]
-    vue[Vue 3 + Vite 前端<br/>frontend_demo/src]
-    api[demo_server.py<br/>HTTP + NDJSON API]
-    session[demo_session.py<br/>stream collector]
-    builder[builder.py<br/>bootstrap + agent bundle]
-    skills[skill_store.py / skills.py<br/>Supervisor Skills]
-    prompts[prompts.py<br/>Prompt 基座]
-    supervisor[Supervisor Graph]
-    roster[generate_subagents<br/>worker roster]
-    workers[Worker Subgraphs]
-    tools[custom_tools.py<br/>ssh_execute / tavily_search / ...]
-    artifacts[workspace_artifacts.py<br/>publish_workspace_file]
-    workspace[workspace/]
-    pg[(PostgreSQL<br/>chat_history_store.py)]
-    logs[(runtime_logs JSONL)]
+
+    subgraph host[宿主机进程]
+        vue[Vue 3 + Vite 前端<br/>frontend_demo/src]
+        api[demo_server.py<br/>HTTP + NDJSON API]
+        session[demo_session.py<br/>stream collector]
+        builder[builder.py<br/>bootstrap + agent bundle]
+        skills[skill_store.py / skills.py<br/>Supervisor Skills]
+        prompts[prompts.py<br/>Prompt 基座]
+        supervisor[Supervisor Graph]
+        roster[generate_subagents<br/>worker roster]
+        workers[Worker Subgraphs]
+        tools[custom_tools.py<br/>ssh_execute / tavily_search / ...]
+        artifacts[workspace_artifacts.py<br/>publish_workspace_file]
+        host_workspace[workspace/<br/>宿主机文件根]
+        pg[(PostgreSQL<br/>chat_history_store.py)]
+        logs[(runtime_logs JSONL)]
+    end
+
+    subgraph docker[Docker 沙箱容器]
+        container_workspace[/workspace<br/>容器工作目录]
+        execute[execute<br/>docker exec 命令执行]
+    end
 
     user --> vue
     vue -->|REST / upload / history| api
@@ -245,11 +262,15 @@ flowchart LR
     roster --> workers
     workers --> tools
     workers --> artifacts
-    artifacts --> workspace
+    artifacts --> host_workspace
+    workers -->|本地文件工具| host_workspace
+    workers -->|execute| execute
+    execute --> container_workspace
+    host_workspace -. volume mount .-> container_workspace
     session --> logs
     session --> pg
     pg --> api
-    workspace --> api
+    host_workspace --> api
     api --> vue
 ```
 
@@ -282,7 +303,13 @@ flowchart LR
 - `app/tools/custom_tools.py`
   - 统一管理可开关的项目扩展工具
   - 后端会自动嗅探其中被 `@tool` 修饰的函数并展示到工具控制台
-  - 当前包含 `ssh_execute(host_ip, command)`，只暴露给 worker，不暴露给 supervisor
+  - 当前包含 `ssh_execute(host_ip, command)` 和 `tavily_search(...)`
+  - 这类扩展工具默认只暴露给 worker，不暴露给 supervisor
+
+- `app/tool_registry.py`
+  - 工具控制台的后端注册中心
+  - 负责区分 pinned supervisor/worker 工具与 `custom_tools.py` 中可动态嗅探的扩展工具
+  - 负责维护 `runtime_logs/tool_controls.json`，并向前端返回工具开关状态
 
 - `app/prompts.py`
   - 只负责 prompt 本体
@@ -380,6 +407,10 @@ flowchart LR
 
 - `frontend_demo/styles.css`
   - 页面样式与主题
+
+- `result/`
+  - 用于存放需要长期保留、适合在 README 中引用的研究产物
+  - 与 `workspace/` 中更偏运行时过程产物的文件区分开
 
 ## 总调度逻辑
 
@@ -925,6 +956,12 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
   - 适合一次性远程执行聚焦命令，不适合长会话和交互式命令
   - 当前只暴露给 worker，作为“落地执行能力”使用
 
+- `tavily_search(...)`
+  - 不是框架默认工具
+  - 由 [custom_tools.py](app/tools/custom_tools.py) 提供，并可在工具控制台开关
+  - 适合需要外部互联网信息、新闻、官网资料或公开网页来源的取证任务
+  - 当前只暴露给 worker，作为“外部检索能力”使用
+
 - `publish_workspace_file(relative_path, title="")`
   - 不是框架默认工具
   - 由 [workspace_artifacts.py](app/tools/workspace_artifacts.py) 提供
@@ -936,7 +973,7 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 
 - supervisor 除了框架内置工具外，还会额外获得 `generate_subagents`（名册工具）；它不挂载远程执行工具
 - supervisor 还会额外挂载 `publish_workspace_file`，用于发布结果文件卡片
-- worker 在框架内置工具之外，会额外获得 `ssh_execute`
+- worker 在框架内置工具之外，会额外挂载当前启用的扩展工具，例如 `ssh_execute`、`tavily_search`
 - worker 运行时虽然仍然天然带有框架内置 `write_todos`，但本项目的 worker 提示词、前端展示和完成守卫都以 `write_evidence_todos` 为准
 - 如果你要观察真正影响 worker 完成态的 checklist，请看 worker 私有 `todo_list`，不要把它和 supervisor 的主 `Action List` 混在一起
 
@@ -981,6 +1018,8 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 ### 3. Skill 管理中心
 
 `skill/<skill_name>/SKILL.md` 用于存放按场景动态加载的 skill。当前这套机制还很初步，主要先承载 supervisor 场景增强。
+
+补充说明：仓库里仍保留了一个 `PROMPT_INSERTS/` 目录，里面是更早一版 prompt insert 实验文件。当前运行时已经不再从该目录加载 skill 或 prompt，它现在只作为历史试验资料保留。
 
 注意：这个功能目前还只是实验性雏形，整体设计还没有完全构思好。当前运行链路已经不再直接按 query 做硬编码关键词匹配，而是先披露 supervisor skill 的 YAML 头，再由 bootstrap 阶段选择要注入的 skill 全文。它依然不是稳定的 prompt routing 方案，但已经不是最初那种字符串匹配试验版。
 
