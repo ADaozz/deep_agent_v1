@@ -1,6 +1,6 @@
 # deep_agent_v1
 
-一个基于 `create_deep_agent` 的真实多 Agent 协同调度 Demo。
+一个基于 `create_deep_agent` 的真实多 Agent 并行 Demo。
 
 这个项目同时面向两类读者：
 
