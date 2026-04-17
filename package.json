@@ -1,0 +1,12 @@
+{
+  "name": "deep-agent-v1",
+  "private": true,
+  "workspaces": [
+    "frontend_demo"
+  ],
+  "scripts": {
+    "frontend:dev": "npm --workspace frontend_demo run dev",
+    "frontend:build": "npm --workspace frontend_demo run build",
+    "frontend:preview": "npm --workspace frontend_demo run preview"
+  }
+}

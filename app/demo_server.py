@@ -38,7 +38,9 @@ from app.workspace_files import WORKSPACE_ROOT, build_workspace_file_card, resol
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-FRONTEND_ROOT = PROJECT_ROOT / "frontend_demo"
+FRONTEND_SOURCE_ROOT = PROJECT_ROOT / "frontend_demo"
+FRONTEND_DIST_ROOT = FRONTEND_SOURCE_ROOT / "dist"
+FRONTEND_ROOT = FRONTEND_DIST_ROOT if FRONTEND_DIST_ROOT.exists() else FRONTEND_SOURCE_ROOT
 ALLOWED_USER_FILE_EXTENSIONS = {".md", ".xlsx", ".csv", ".txt", ".py"}
 MAX_USER_FILE_SIZE = 10 * 1024
 MAX_USER_FILE_COUNT = 3

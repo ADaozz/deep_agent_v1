@@ -12,6 +12,10 @@ __pycache__/
 
 runtime_logs/
 
+frontend_demo/node_modules/
+frontend_demo/dist/
+node_modules/
+
 # sandbox workspace (keep folder via workspace/.gitkeep)
 workspace/*
 !workspace/.gitkeep

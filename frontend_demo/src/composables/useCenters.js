@@ -1,0 +1,454 @@
+import { ref } from "vue";
+
+import { demoApi } from "../api.js";
+import { EMPTY_DELETE_CONFIRM } from "../constants.js";
+import {
+  buildRawSkillDocument,
+  cloneBaseState,
+  createThreadId,
+  hydrateSessionUserFiles,
+  mergeSessionState,
+  normalizeSessionState,
+  normalizeUiState,
+  readCachedThreadHistory,
+  removeCachedSessionUserFilesForThread,
+} from "../utils.js";
+
+export function useCenters({
+  threadId,
+  uiState,
+  history,
+  demoState,
+  error,
+  loading,
+  clearPendingUserFiles,
+}) {
+  const modelName = ref("");
+
+  const promptSections = ref([]);
+  const promptLoading = ref(false);
+  const promptError = ref("");
+  const promptSaving = ref(false);
+  const promptResetting = ref(false);
+  const promptSaveFeedback = ref("");
+  const promptSaveFeedbackTone = ref("");
+
+  const skillSections = ref([]);
+  const skillLoading = ref(false);
+  const skillError = ref("");
+  const skillSaving = ref(false);
+  const skillResetting = ref(false);
+  const skillSaveFeedback = ref("");
+  const skillSaveFeedbackTone = ref("");
+
+  const toolSections = ref([]);
+  const toolLoading = ref(false);
+  const toolError = ref("");
+  const toolTogglingId = ref("");
+  const toolSaveFeedback = ref("");
+  const toolSaveFeedbackTone = ref("");
+
+  const historyThreads = ref([]);
+  const historyThreadsLoading = ref(false);
+  const historyThreadsError = ref("");
+  const deletingThreadId = ref("");
+  const deleteConfirm = ref({ ...EMPTY_DELETE_CONFIRM });
+
+  async function loadMeta() {
+    try {
+      const payload = await demoApi.fetchMeta();
+      modelName.value = payload.model || "";
+      demoState.value = {
+        ...demoState.value,
+        agents: (payload.agents || []).map((agent) => agent),
+      };
+    } catch {}
+  }
+
+  async function loadHistory() {
+    try {
+      const cachedThreadId = threadId.value;
+      const cachedSessions = readCachedThreadHistory(cachedThreadId);
+      const payload = await demoApi.fetchHistory(cachedThreadId);
+      const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+      const normalizedSessions = sessions.map((session) => ({
+        id: session.id,
+        query: session.query || "",
+        state: mergeSessionState(cloneBaseState(), session.state),
+        error: session.error || "",
+      }));
+      const mergedSessions =
+        normalizedSessions.length || !cachedSessions.length
+          ? normalizedSessions.map((session) => {
+              const cached = cachedSessions.find((item) => item.id === session.id);
+              const merged = cached ? { ...session, state: mergeSessionState(cached.state, session.state) } : session;
+              return hydrateSessionUserFiles(payload.thread_id || cachedThreadId, merged);
+            })
+          : cachedSessions.map((session) => hydrateSessionUserFiles(cachedThreadId, session));
+      if (payload.thread_id) threadId.value = payload.thread_id;
+      uiState.value = normalizeUiState({
+        ...uiState.value,
+        ...(payload.ui_state || {}),
+        showPromptModal: false,
+        showSkillModal: false,
+        showHistoryModal: false,
+        showToolModal: false,
+        showArtifactModal: false,
+      });
+      await clearPendingUserFiles();
+      if (mergedSessions.length) {
+        history.value = mergedSessions;
+        const lastSession = mergedSessions[mergedSessions.length - 1];
+        demoState.value = normalizeSessionState(lastSession.state);
+        error.value = lastSession.error || "";
+      } else {
+        history.value = [];
+        demoState.value = cloneBaseState();
+        error.value = "";
+      }
+    } catch {}
+  }
+
+  async function loadHistoryThreads() {
+    historyThreadsLoading.value = true;
+    historyThreadsError.value = "";
+    try {
+      const payload = await demoApi.fetchHistoryThreads();
+      historyThreads.value = Array.isArray(payload.threads) ? payload.threads : [];
+    } catch (loadError) {
+      historyThreadsError.value = `加载历史线程失败: ${loadError.message}`;
+    } finally {
+      historyThreadsLoading.value = false;
+    }
+  }
+
+  async function loadPrompts() {
+    promptLoading.value = true;
+    promptError.value = "";
+    try {
+      const payload = await demoApi.fetchPrompts();
+      const prompts = Array.isArray(payload.prompts) ? payload.prompts : [];
+      promptSections.value = prompts;
+      const nextId = uiState.value.activePromptId || prompts[0]?.id || "";
+      const matched = prompts.find((item) => item.id === nextId) || prompts[0];
+      uiState.value = normalizeUiState({
+        ...uiState.value,
+        activePromptId: nextId,
+        promptDraft: matched?.content || "",
+      });
+    } catch (loadError) {
+      promptError.value = `加载提示词失败: ${loadError.message}`;
+    } finally {
+      promptLoading.value = false;
+    }
+  }
+
+  async function loadSkills() {
+    skillLoading.value = true;
+    skillError.value = "";
+    try {
+      const payload = await demoApi.fetchSkills();
+      const skills = Array.isArray(payload.skills) ? payload.skills : [];
+      skillSections.value = skills;
+      const nextId = uiState.value.activeSkillId || skills[0]?.id || "";
+      const matched = skills.find((item) => item.id === nextId) || skills[0];
+      uiState.value = normalizeUiState({
+        ...uiState.value,
+        activeSkillId: nextId,
+        skillDraft: matched?.body || "",
+      });
+    } catch (loadError) {
+      skillError.value = `加载 skill 失败: ${loadError.message}`;
+    } finally {
+      skillLoading.value = false;
+    }
+  }
+
+  async function loadTools() {
+    toolLoading.value = true;
+    toolError.value = "";
+    try {
+      const payload = await demoApi.fetchTools();
+      const tools = Array.isArray(payload.tools) ? payload.tools : [];
+      toolSections.value = tools;
+      uiState.value = normalizeUiState({
+        ...uiState.value,
+        activeToolId: uiState.value.activeToolId || tools[0]?.id || "",
+      });
+    } catch (loadError) {
+      toolError.value = `加载工具列表失败: ${loadError.message}`;
+    } finally {
+      toolLoading.value = false;
+    }
+  }
+
+  function openPromptCenter() {
+    uiState.value = normalizeUiState({ ...uiState.value, showPromptModal: true });
+    if (!promptSections.value.length && !promptLoading.value) void loadPrompts();
+  }
+
+  function openSkillCenter() {
+    uiState.value = normalizeUiState({ ...uiState.value, showSkillModal: true });
+    if (!skillSections.value.length && !skillLoading.value) void loadSkills();
+  }
+
+  function openToolCenter() {
+    uiState.value = normalizeUiState({ ...uiState.value, showToolModal: true });
+    if (!toolSections.value.length && !toolLoading.value) void loadTools();
+  }
+
+  function openHistoryCenter() {
+    uiState.value = normalizeUiState({ ...uiState.value, showHistoryModal: true });
+    if (!historyThreads.value.length && !historyThreadsLoading.value) void loadHistoryThreads();
+  }
+
+  async function handleSavePrompt() {
+    const targetId = uiState.value.activePromptId;
+    if (!targetId || promptSaving.value) return;
+    promptSaving.value = true;
+    try {
+      const payload = await demoApi.savePrompt(targetId, uiState.value.promptDraft);
+      promptSections.value = Array.isArray(payload.prompts) ? payload.prompts : promptSections.value;
+      promptSaveFeedback.value = "提示词已保存。";
+      promptSaveFeedbackTone.value = "success";
+    } catch (saveError) {
+      promptSaveFeedback.value = `保存失败: ${saveError.message}`;
+      promptSaveFeedbackTone.value = "error";
+    } finally {
+      promptSaving.value = false;
+    }
+  }
+
+  async function handleResetPrompt() {
+    const targetId = uiState.value.activePromptId;
+    if (!targetId || promptResetting.value) return;
+    promptResetting.value = true;
+    try {
+      const payload = await demoApi.resetPrompt(targetId);
+      promptSections.value = Array.isArray(payload.prompts) ? payload.prompts : promptSections.value;
+      const matched = (payload.prompts || []).find((item) => item.id === targetId);
+      uiState.value = normalizeUiState({ ...uiState.value, promptDraft: matched?.content || "" });
+      promptSaveFeedback.value = "已恢复默认提示词。";
+      promptSaveFeedbackTone.value = "success";
+    } catch (resetError) {
+      promptSaveFeedback.value = `恢复失败: ${resetError.message}`;
+      promptSaveFeedbackTone.value = "error";
+    } finally {
+      promptResetting.value = false;
+    }
+  }
+
+  async function handleSaveSkill() {
+    const targetId = uiState.value.activeSkillId;
+    if (!targetId || skillSaving.value) return;
+    skillSaving.value = true;
+    try {
+      const activeSkill = skillSections.value.find((item) => item.id === targetId);
+      const rawContent = buildRawSkillDocument(activeSkill?.frontmatter || {}, uiState.value.skillDraft);
+      const payload = await demoApi.saveSkill(targetId, rawContent);
+      skillSections.value = Array.isArray(payload.skills) ? payload.skills : skillSections.value;
+      skillSaveFeedback.value = "Skill 已保存。";
+      skillSaveFeedbackTone.value = "success";
+    } catch (saveError) {
+      skillSaveFeedback.value = `保存失败: ${saveError.message}`;
+      skillSaveFeedbackTone.value = "error";
+    } finally {
+      skillSaving.value = false;
+    }
+  }
+
+  async function handleResetSkill() {
+    const targetId = uiState.value.activeSkillId;
+    if (!targetId || skillResetting.value) return;
+    skillResetting.value = true;
+    try {
+      const payload = await demoApi.resetSkill(targetId);
+      skillSections.value = Array.isArray(payload.skills) ? payload.skills : skillSections.value;
+      const matched = (payload.skills || []).find((item) => item.id === targetId);
+      uiState.value = normalizeUiState({ ...uiState.value, skillDraft: matched?.body || "" });
+      skillSaveFeedback.value = "已恢复默认 Skill。";
+      skillSaveFeedbackTone.value = "success";
+    } catch (resetError) {
+      skillSaveFeedback.value = `恢复失败: ${resetError.message}`;
+      skillSaveFeedbackTone.value = "error";
+    } finally {
+      skillResetting.value = false;
+    }
+  }
+
+  async function handleToggleTool(toolId, enabled) {
+    if (!toolId || toolTogglingId.value) return;
+    toolTogglingId.value = toolId;
+    try {
+      const payload = await demoApi.toggleTool(toolId, enabled);
+      toolSections.value = Array.isArray(payload.tools) ? payload.tools : toolSections.value;
+      toolSaveFeedback.value = enabled ? "工具已启用，后续新建的 agent 可见。" : "工具已关闭，后续新建的 agent 将不可见。";
+      toolSaveFeedbackTone.value = "success";
+    } catch (toggleError) {
+      toolSaveFeedback.value = `切换失败: ${toggleError.message}`;
+      toolSaveFeedbackTone.value = "error";
+    } finally {
+      toolTogglingId.value = "";
+    }
+  }
+
+  async function handleSelectThread(nextThreadId) {
+    if (!nextThreadId || nextThreadId === threadId.value) {
+      uiState.value = normalizeUiState({ ...uiState.value, showHistoryModal: false });
+      return;
+    }
+    await clearPendingUserFiles();
+    try {
+      const payload = await demoApi.fetchHistory(nextThreadId);
+      const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
+      const normalizedSessions = sessions.map((session) => ({
+        id: session.id,
+        query: session.query || "",
+        state: mergeSessionState(cloneBaseState(), session.state),
+        error: session.error || "",
+      }));
+      threadId.value = payload.thread_id || nextThreadId;
+      uiState.value = normalizeUiState({
+        ...uiState.value,
+        ...(payload.ui_state || {}),
+        showPromptModal: false,
+        showSkillModal: false,
+        showHistoryModal: false,
+      });
+      history.value = normalizedSessions.map((session) => hydrateSessionUserFiles(threadId.value, session));
+      if (history.value.length) {
+        const lastSession = history.value[history.value.length - 1];
+        demoState.value = normalizeSessionState(lastSession.state);
+        error.value = lastSession.error || "";
+      } else {
+        demoState.value = cloneBaseState();
+        error.value = "";
+      }
+    } catch (selectError) {
+      historyThreadsError.value = `切换历史线程失败: ${selectError.message}`;
+    }
+  }
+
+  async function handleDeleteThread(targetThreadId) {
+    if (!targetThreadId || deletingThreadId.value) return;
+    deletingThreadId.value = targetThreadId;
+    try {
+      const payload = await demoApi.deleteHistoryThread(targetThreadId);
+      historyThreads.value = historyThreads.value.filter((thread) => thread.thread_id !== targetThreadId);
+      removeCachedSessionUserFilesForThread(targetThreadId);
+      if (threadId.value !== targetThreadId) return;
+      if (payload.latest_thread_id) {
+        await handleSelectThread(payload.latest_thread_id);
+        return;
+      }
+      threadId.value = createThreadId();
+      history.value = [];
+      error.value = "";
+      demoState.value = cloneBaseState();
+    } catch (deleteError) {
+      historyThreadsError.value = `删除历史线程失败: ${deleteError.message}`;
+    } finally {
+      deletingThreadId.value = "";
+      deleteConfirm.value = { ...EMPTY_DELETE_CONFIRM };
+    }
+  }
+
+  function selectPrompt(promptId) {
+    uiState.value = normalizeUiState({
+      ...uiState.value,
+      activePromptId: promptId,
+      promptDraft: promptSections.value.find((item) => item.id === promptId)?.content || "",
+    });
+  }
+
+  function updatePromptDraft(content) {
+    uiState.value = normalizeUiState({ ...uiState.value, promptDraft: content });
+  }
+
+  function selectSkill(skillId) {
+    uiState.value = normalizeUiState({
+      ...uiState.value,
+      activeSkillId: skillId,
+      skillDraft: skillSections.value.find((item) => item.id === skillId)?.body || "",
+    });
+  }
+
+  function updateSkillDraft(content) {
+    uiState.value = normalizeUiState({ ...uiState.value, skillDraft: content });
+  }
+
+  function selectTool(toolId) {
+    uiState.value = normalizeUiState({ ...uiState.value, activeToolId: toolId });
+  }
+
+  function closePromptModal() {
+    uiState.value = normalizeUiState({ ...uiState.value, showPromptModal: false });
+  }
+
+  function closeSkillModal() {
+    uiState.value = normalizeUiState({ ...uiState.value, showSkillModal: false });
+  }
+
+  function closeToolModal() {
+    uiState.value = normalizeUiState({ ...uiState.value, showToolModal: false });
+  }
+
+  function closeHistoryModal() {
+    uiState.value = normalizeUiState({ ...uiState.value, showHistoryModal: false });
+  }
+
+  return {
+    deleteConfirm,
+    deletingThreadId,
+    historyThreads,
+    historyThreadsError,
+    historyThreadsLoading,
+    loadHistory,
+    loadHistoryThreads,
+    loadMeta,
+    loadPrompts,
+    loadSkills,
+    loadTools,
+    modelName,
+    openHistoryCenter,
+    openPromptCenter,
+    openSkillCenter,
+    openToolCenter,
+    promptError,
+    promptLoading,
+    promptResetting,
+    promptSaveFeedback,
+    promptSaveFeedbackTone,
+    promptSaving,
+    promptSections,
+    skillError,
+    skillLoading,
+    skillResetting,
+    skillSaveFeedback,
+    skillSaveFeedbackTone,
+    skillSaving,
+    skillSections,
+    toolError,
+    toolLoading,
+    toolSaveFeedback,
+    toolSaveFeedbackTone,
+    toolSections,
+    toolTogglingId,
+    handleDeleteThread,
+    handleResetPrompt,
+    handleResetSkill,
+    handleSavePrompt,
+    handleSaveSkill,
+    handleSelectThread,
+    handleToggleTool,
+    selectPrompt,
+    selectSkill,
+    selectTool,
+    updatePromptDraft,
+    updateSkillDraft,
+    closePromptModal,
+    closeSkillModal,
+    closeToolModal,
+    closeHistoryModal,
+  };
+}
