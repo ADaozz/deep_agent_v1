@@ -331,6 +331,16 @@ flowchart LR
 
 ### 前端
 
+- 前端重构说明
+  - 这个 Demo 最初是一个偏“零构建”的单文件前端：主要逻辑集中在 `frontend_demo/app.js`，由 `index.html` 直接加载并运行
+  - 随着历史会话、提示词管理、Skill 管理、工具控制、文件预览、上传队列、流式状态同步这些能力持续叠加，单文件结构已经不适合继续维护
+  - 当前版本已重构为 `Vue 3 + Vite` 工程，目标不是换框架本身，而是降低状态耦合、提高代码复用率，并把请求层、状态层、展示层拆开
+  - 这次重构的核心变化是：
+    - 从 `frontend_demo/app.js` 单文件实现，迁移到 `frontend_demo/src/App.js + components + composables`
+    - 从“HTML 直接挂逻辑”改为 `main.js` 挂载 Vue 根组件
+    - 从零构建前端演进为 npm / Vite 工程，同时仍保留未构建时的后端静态服务回退能力
+    - 普通 JSON 请求与上传统一走 `axios`，只有 `/api/demo/run` 的 NDJSON 流保留 `fetch`，避免丢失流式消费能力
+
 - `frontend_demo/index.html`
   - Vite 应用入口 HTML
   - 开发态由 Vite 直接接管，构建后输出到 `frontend_demo/dist/`
@@ -359,15 +369,14 @@ flowchart LR
   - 统一封装前端 API 请求
   - 普通 JSON 请求和上传走 `axios`
   - `/api/demo/run` 的 NDJSON 流继续使用 `fetch`，避免丢失流式读取能力
-  - 负责渲染：
-    - 顶部状态卡片
-    - User Query
-    - Action List
-    - Workers And Checklists
-    - Round Trace
-    - Execution Log
-    - Final Summary
-    - Workspace Files
+
+- `frontend_demo/src/components/*.js`
+  - 拆出通用展示组件与各类中心面板
+  - 包括会话转录区、提示词中心、Skill 中心、工具中心、历史会话中心等
+
+- `frontend_demo/src/composables/*.js`
+  - 拆出上传、文件预览、会话运行、持久化、管理中心等状态逻辑
+  - 让 `App.js` 只保留装配职责，避免继续回到“大型单文件状态机”
 
 - `frontend_demo/styles.css`
   - 页面样式与主题
