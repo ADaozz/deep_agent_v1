@@ -226,28 +226,28 @@ deep_agent_v1/
 
 ```mermaid
 flowchart LR
-    user[用户 / Browser]
+    user["用户 / Browser"]
 
     subgraph host[宿主机进程]
-        vue[Vue 3 + Vite 前端<br/>frontend_demo/src]
-        api[demo_server.py<br/>HTTP + NDJSON API]
-        session[demo_session.py<br/>stream collector]
-        builder[builder.py<br/>bootstrap + agent bundle]
-        skills[skill_store.py / skills.py<br/>Supervisor Skills]
-        prompts[prompts.py<br/>Prompt 基座]
-        supervisor[Supervisor Graph]
-        roster[generate_subagents<br/>worker roster]
-        workers[Worker Subgraphs]
-        tools[custom_tools.py<br/>ssh_execute / tavily_search / ...]
-        artifacts[workspace_artifacts.py<br/>publish_workspace_file]
-        host_workspace[workspace/<br/>宿主机文件根]
-        pg[(PostgreSQL<br/>chat_history_store.py)]
-        logs[(runtime_logs JSONL)]
+        vue["Vue 3 + Vite 前端 frontend_demo/src"]
+        api["demo_server.py HTTP + NDJSON API"]
+        session["demo_session.py stream collector"]
+        builder["builder.py bootstrap + agent bundle"]
+        skills["skill_store.py / skills.py Supervisor Skills"]
+        prompts["prompts.py Prompt 基座"]
+        supervisor["Supervisor Graph"]
+        roster["generate_subagents worker roster"]
+        workers["Worker Subgraphs"]
+        tools["custom_tools.py ssh_execute / tavily_search / ..."]
+        artifacts["workspace_artifacts.py publish_workspace_file"]
+        host_workspace["宿主机 workspace/ 文件根"]
+        pg["PostgreSQL chat_history_store.py"]
+        logs["runtime_logs JSONL"]
     end
 
     subgraph docker[Docker 沙箱容器]
-        container_workspace[/workspace<br/>容器工作目录]
-        execute[execute<br/>docker exec 命令执行]
+        container_workspace["容器 /workspace 工作目录"]
+        execute["execute docker exec 命令执行"]
     end
 
     user --> vue
