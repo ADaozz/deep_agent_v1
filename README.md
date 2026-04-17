@@ -10,7 +10,7 @@
 项目包含两套入口：
 
 - CLI 运行模式：直接在终端里观察 `create_deep_agent` 的流式执行过程
-- Web Demo 模式：通过一个零构建前端页面可视化展示 Supervisor、Action List、Round、Worker checklist、Execution Log 和 Final Summary
+- Web Demo 模式：通过一个基于 Vue 3 + Vite 的前端页面可视化展示 Supervisor、Action List、Round、Worker checklist、Execution Log 和 Final Summary
 
 这个仓库的重点不是“静态模拟多 agent UI”，而是把真实 `create_deep_agent` 调度过程解析成前端可消费的结构化状态。
 
@@ -122,6 +122,7 @@ deep_agent_v1/
 │   │   ├── __init__.py
 │   │   ├── custom_tools.py
 │   │   ├── subagent_roster.py
+│   │   ├── supervisor_skill_inspector.py
 │   │   └── workspace_artifacts.py
 │   ├── config.py
 │   ├── chat_history_store.py
@@ -134,8 +135,26 @@ deep_agent_v1/
 │   ├── workspace_files.py
 │   └── runner.py
 ├── frontend_demo/
-│   ├── app.js
 │   ├── index.html
+│   ├── main.js
+│   ├── package.json
+│   ├── src/
+│   │   ├── api.js
+│   │   ├── App.js
+│   │   ├── constants.js
+│   │   ├── icons.js
+│   │   ├── utils.js
+│   │   ├── components/
+│   │       ├── centers.js
+│   │       ├── common.js
+│   │       └── transcript.js
+│   │   └── composables/
+│   │       ├── useArtifacts.js
+│   │       ├── useCenters.js
+│   │       ├── usePersistence.js
+│   │       ├── useSessionRuntime.js
+│   │       └── useUploads.js
+│   ├── vite.config.js
 │   └── styles.css
 ├── skill/
 │   ├── coding_principles/
@@ -151,6 +170,7 @@ deep_agent_v1/
 ├── Supervisor Conversation Runtime.html
 ├── Supervisor Conversation Runtime_files/
 ├── main.py
+├── package.json
 ├── requirements.txt
 ├── serve_demo.py
 └── README.md
@@ -184,13 +204,54 @@ deep_agent_v1/
 
 5. 交互展示层
    - [demo_server.py](app/demo_server.py)
-   - [app.js](frontend_demo/app.js)
+   - [main.js](frontend_demo/main.js)
+   - [App.js](frontend_demo/src/App.js)
    - [styles.css](frontend_demo/styles.css)
    - 负责提供 Web API、推送 NDJSON 流，并在前端渲染会话、任务、round、worker 和最终回答
 
 用一条链概括就是：
 
 `用户 query -> bootstrap(skill 头披露/技能选择/任务理解) -> build_agent_bundle(query) -> supervisor -> task 派发 -> worker 子图执行 -> collector 转状态/日志 -> 前端渲染`
+
+下面这张 Mermaid 图把当前项目里最关键的运行链路、前后端边界和持久化关系串起来：
+
+```mermaid
+flowchart LR
+    user[用户 / Browser]
+    vue[Vue 3 + Vite 前端<br/>frontend_demo/src]
+    api[demo_server.py<br/>HTTP + NDJSON API]
+    session[demo_session.py<br/>stream collector]
+    builder[builder.py<br/>bootstrap + agent bundle]
+    skills[skill_store.py / skills.py<br/>Supervisor Skills]
+    prompts[prompts.py<br/>Prompt 基座]
+    supervisor[Supervisor Graph]
+    roster[generate_subagents<br/>worker roster]
+    workers[Worker Subgraphs]
+    tools[custom_tools.py<br/>ssh_execute / tavily_search / ...]
+    artifacts[workspace_artifacts.py<br/>publish_workspace_file]
+    workspace[workspace/]
+    pg[(PostgreSQL<br/>chat_history_store.py)]
+    logs[(runtime_logs JSONL)]
+
+    user --> vue
+    vue -->|REST / upload / history| api
+    vue -->|/api/demo/run NDJSON| api
+    api --> session
+    session --> builder
+    builder --> skills
+    builder --> prompts
+    builder --> supervisor
+    supervisor --> roster
+    roster --> workers
+    workers --> tools
+    workers --> artifacts
+    artifacts --> workspace
+    session --> logs
+    session --> pg
+    pg --> api
+    workspace --> api
+    api --> vue
+```
 
 ## 核心模块说明
 
@@ -271,15 +332,33 @@ deep_agent_v1/
 ### 前端
 
 - `frontend_demo/index.html`
-  - 通过 import map 直接加载前端依赖
-  - 无需构建工具
+  - Vite 应用入口 HTML
+  - 开发态由 Vite 直接接管，构建后输出到 `frontend_demo/dist/`
+  - 同时保留 import map，确保未构建时仍可由后端直接静态服务
 
-- `frontend_demo/app.js`
-  - 整个 Demo 页面逻辑
+- `frontend_demo/main.js`
+  - Vue 入口文件
+  - 挂载根组件
+
+- `frontend_demo/package.json`
+  - 前端依赖、脚本与 npm 工程定义
+
+- `frontend_demo/vite.config.js`
+  - Vite 配置
+  - 开发态把 `/api` 代理到 `http://127.0.0.1:8080`
+  - 生产构建输出到 `frontend_demo/dist/`
+
+- `frontend_demo/src/App.js`
+  - 整个 Demo 页面主状态层
   - 负责流式消费 `/api/demo/run`
   - 负责多轮会话状态管理
   - 使用统一的 `uiState` 对象维护主题、输入框、当前弹窗、当前选中 agent / 文件等前端状态
   - 支持历史会话侧栏、提示词管理中心、Skill 管理中心、工具控制台、文件卡片与文件预览弹窗
+
+- `frontend_demo/src/api.js`
+  - 统一封装前端 API 请求
+  - 普通 JSON 请求和上传走 `axios`
+  - `/api/demo/run` 的 NDJSON 流继续使用 `fetch`，避免丢失流式读取能力
   - 负责渲染：
     - 顶部状态卡片
     - User Query
@@ -1059,13 +1138,17 @@ python3 serve_demo.py --host 0.0.0.0 --port 8080
 - 左侧菜单
   - 历史会话
   - 提示词管理
-  - 执行中禁用，避免打断当前运行态
+  - Skill 管理
+  - 工具控制
+  - 执行中允许查看，不允许修改保存或切换线程
 
 ### 前端特点
 
-- 不依赖 webpack / vite
+- 兼容两种运行方式：Vite 工程 / 后端直接静态服务
 - 使用浏览器原生 ES Module
-- 使用 `react` + `htm`
+- 使用 Vite 作为前端开发与构建工具
+- 使用 Vue 3 组件化拆分
+- 公共 JSON 请求与上传统一经 `axios` 封装
 - 通过 NDJSON 流式更新页面
 - 最终回答支持 Markdown 和 Mermaid
 
@@ -1214,7 +1297,7 @@ python3 main.py --prompt "你的问题"
 当前约束包括：
 
 - HTTP 服务使用标准库 `http.server`，不是 FastAPI
-- 前端是零构建页面，依赖从 CDN 直接加载
+- 后端优先服务 `frontend_demo/dist/`；若未构建则回退到 `frontend_demo/`
 - 动态注册的子 Agent 只保存在进程内，服务重启后不会持久化
 
 ## 常见问题
@@ -1274,7 +1357,7 @@ python3 serve_demo.py --host 0.0.0.0 --port 8080
 
 ### 5. 前端为什么能显示 Markdown 和 Mermaid？
 
-因为 [index.html](frontend_demo/index.html) 通过 import map 引入了：
+因为前端依赖里包含：
 
 - `marked`
 - `dompurify`
@@ -1393,7 +1476,7 @@ http://127.0.0.1:8080
 - Web 入口：[serve_demo.py](serve_demo.py)
 - Agent 构建：[builder.py](app/agent/builder.py)
 - Session 收集：[demo_session.py](app/demo_session.py)
-- 前端主逻辑：[app.js](frontend_demo/app.js)
+- 前端主逻辑：[App.js](frontend_demo/src/App.js)
 
 ## License
 
