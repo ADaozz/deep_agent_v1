@@ -9,41 +9,90 @@ from app.skills import Skill, load_skill_text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SKILLS_ROOT = PROJECT_ROOT / "skill"
+PREFERRED_SKILL_ORDER = ("deep_research", "coding_principles")
 
-SUPERVISOR_SKILL_CONFIGS = {
-    "deep_research": {
-        "title": "Deep Research Supervisor Skill",
-        "route_note": "以下 supervisor skill 只在用户请求属于争议性技术话题、事实核验、benchmark 解读、立场判断或趋势分析时启用。",
-        "source": "skill/deep_research/SKILL.md",
-    },
-    "coding_principles": {
-        "title": "Karpathy Coding Principles Supervisor Skill",
-        "route_note": "以下 supervisor skill 只在用户请求属于写代码、改代码、重构、工程化整理、代码评审或实现逻辑修改等编码任务时启用。",
-        "source": "skill/coding_principles/SKILL.md",
-    },
-}
+_SUPERVISOR_SKILL_ORDER: tuple[str, ...] = ()
+_SUPERVISOR_SKILL_PATHS: dict[str, Path] = {}
+_SUPERVISOR_SKILL_DEFAULT_RAW: dict[str, str] = {}
+_SUPERVISOR_SKILL_STORE: dict[str, str] = {}
+_SUPERVISOR_SKILL_META: dict[str, dict[str, str]] = {}
 
-SUPERVISOR_SKILL_ORDER = tuple(SUPERVISOR_SKILL_CONFIGS.keys())
-SUPERVISOR_SKILL_PATHS = {
-    skill_id: SKILLS_ROOT / skill_id / "SKILL.md" for skill_id in SUPERVISOR_SKILL_ORDER
-}
-_SUPERVISOR_SKILL_DEFAULT_RAW = {
-    skill_id: path.read_text(encoding="utf-8") for skill_id, path in SUPERVISOR_SKILL_PATHS.items()
-}
-_SUPERVISOR_SKILL_STORE = deepcopy(_SUPERVISOR_SKILL_DEFAULT_RAW)
+
+def _refresh_supervisor_skill_registry() -> None:
+    global _SUPERVISOR_SKILL_ORDER
+    global _SUPERVISOR_SKILL_PATHS
+    global _SUPERVISOR_SKILL_DEFAULT_RAW
+    global _SUPERVISOR_SKILL_STORE
+    global _SUPERVISOR_SKILL_META
+
+    discovered: list[tuple[str, Path, Skill, dict[str, str], str]] = []
+    if SKILLS_ROOT.exists():
+        for skill_dir in sorted(path for path in SKILLS_ROOT.iterdir() if path.is_dir()):
+            skill_file = skill_dir / "SKILL.md"
+            if not skill_file.exists():
+                continue
+            raw_text = skill_file.read_text(encoding="utf-8")
+            generic_skill = load_skill_text(
+                raw_text=raw_text,
+                skill_dir_name=skill_dir.name,
+                source_path=skill_file,
+            )
+            skill_scope = str(generic_skill.metadata.get("skill_scope") or "supervisor").strip().lower()
+            if skill_scope != "supervisor":
+                continue
+            skill = load_skill_text(
+                raw_text=raw_text,
+                skill_dir_name=skill_dir.name,
+                runtime_target="supervisor",
+                source_path=skill_file,
+            )
+            meta = {
+                "title": str(generic_skill.metadata.get("title") or skill.name).strip() or skill.name,
+                "route_note": (
+                    str(generic_skill.metadata.get("route_note") or "").strip()
+                    or "以下 supervisor skill 会在 bootstrap 阶段先披露 YAML 头，再按 query 与 route_keywords 命中后注入全文。"
+                ),
+                "source": skill_file.relative_to(PROJECT_ROOT).as_posix(),
+            }
+            discovered.append((skill.name, skill_file, skill, meta, raw_text))
+
+    def order_key(item: tuple[str, Path, Skill, dict[str, str], str]) -> tuple[int, int | str]:
+        skill_id = item[0]
+        if skill_id in PREFERRED_SKILL_ORDER:
+            return (0, PREFERRED_SKILL_ORDER.index(skill_id))
+        return (1, skill_id)
+
+    discovered.sort(key=order_key)
+    skill_ids = tuple(item[0] for item in discovered)
+    paths = {skill_id: path for skill_id, path, _, _, _ in discovered}
+    defaults = {skill_id: raw_text for skill_id, _, _, _, raw_text in discovered}
+    meta_map = {skill_id: meta for skill_id, _, _, meta, _ in discovered}
+
+    next_store: dict[str, str] = {}
+    for skill_id in skill_ids:
+        next_store[skill_id] = _SUPERVISOR_SKILL_STORE.get(skill_id, defaults[skill_id])
+
+    _SUPERVISOR_SKILL_ORDER = skill_ids
+    _SUPERVISOR_SKILL_PATHS = paths
+    _SUPERVISOR_SKILL_DEFAULT_RAW = defaults
+    _SUPERVISOR_SKILL_STORE = next_store
+    _SUPERVISOR_SKILL_META = meta_map
 
 
 def _load_runtime_skill(*, skill_id: str, raw_text: str | None = None) -> Skill:
+    _refresh_supervisor_skill_registry()
     content = _SUPERVISOR_SKILL_STORE[skill_id] if raw_text is None else raw_text
     return load_skill_text(
         raw_text=content,
         skill_dir_name=skill_id,
         runtime_target="supervisor",
-        source_path=SUPERVISOR_SKILL_PATHS[skill_id],
+        source_path=_SUPERVISOR_SKILL_PATHS[skill_id],
     )
+
+
 def _build_skill_section(*, skill_id: str) -> dict[str, object]:
     skill = _load_runtime_skill(skill_id=skill_id)
-    meta = SUPERVISOR_SKILL_CONFIGS[skill_id]
+    meta = _SUPERVISOR_SKILL_META[skill_id]
     return {
         "id": skill_id,
         "title": meta["title"],
@@ -60,7 +109,7 @@ def _build_skill_section(*, skill_id: str) -> dict[str, object]:
 
 def _build_skill_header_payload(*, skill_id: str) -> dict[str, Any]:
     skill = _load_runtime_skill(skill_id=skill_id)
-    meta = SUPERVISOR_SKILL_CONFIGS[skill_id]
+    meta = _SUPERVISOR_SKILL_META[skill_id]
     return {
         "id": skill_id,
         "name": skill.name,
@@ -73,14 +122,17 @@ def _build_skill_header_payload(*, skill_id: str) -> dict[str, Any]:
 
 
 def list_skill_sections() -> list[dict[str, object]]:
-    return [_build_skill_section(skill_id=skill_id) for skill_id in SUPERVISOR_SKILL_ORDER]
+    _refresh_supervisor_skill_registry()
+    return [_build_skill_section(skill_id=skill_id) for skill_id in _SUPERVISOR_SKILL_ORDER]
 
 
 def list_supervisor_skill_headers() -> list[dict[str, Any]]:
-    return [_build_skill_header_payload(skill_id=skill_id) for skill_id in SUPERVISOR_SKILL_ORDER]
+    _refresh_supervisor_skill_registry()
+    return [_build_skill_header_payload(skill_id=skill_id) for skill_id in _SUPERVISOR_SKILL_ORDER]
 
 
 def get_supervisor_skill(skill_id: str) -> dict[str, object]:
+    _refresh_supervisor_skill_registry()
     normalized_id = skill_id.strip()
     if normalized_id not in _SUPERVISOR_SKILL_STORE:
         raise KeyError(f"unknown_skill_id: {normalized_id}")
@@ -88,6 +140,7 @@ def get_supervisor_skill(skill_id: str) -> dict[str, object]:
 
 
 def normalize_supervisor_skill_ids(skill_ids: list[str] | None) -> list[str]:
+    _refresh_supervisor_skill_registry()
     normalized: list[str] = []
     seen: set[str] = set()
     for raw_skill_id in skill_ids or []:
@@ -100,6 +153,7 @@ def normalize_supervisor_skill_ids(skill_ids: list[str] | None) -> list[str]:
 
 
 def update_skill_section(*, skill_id: str, content: str) -> dict[str, object]:
+    _refresh_supervisor_skill_registry()
     normalized_id = skill_id.strip()
     if normalized_id not in _SUPERVISOR_SKILL_STORE:
         raise KeyError(f"unknown_skill_id: {normalized_id}")
@@ -114,6 +168,7 @@ def update_skill_section(*, skill_id: str, content: str) -> dict[str, object]:
 
 
 def reset_skill_section(*, skill_id: str) -> dict[str, object]:
+    _refresh_supervisor_skill_registry()
     normalized_id = skill_id.strip()
     if normalized_id not in _SUPERVISOR_SKILL_DEFAULT_RAW:
         raise KeyError(f"unknown_skill_id: {normalized_id}")
@@ -122,10 +177,11 @@ def reset_skill_section(*, skill_id: str) -> dict[str, object]:
 
 
 def build_supervisor_skill_prompt_suffix(*, skill_ids: list[str] | None) -> str:
+    _refresh_supervisor_skill_registry()
     blocks: list[str] = []
     for skill_id in normalize_supervisor_skill_ids(skill_ids):
         skill = _load_runtime_skill(skill_id=skill_id)
-        config = SUPERVISOR_SKILL_CONFIGS[skill_id]
+        config = _SUPERVISOR_SKILL_META[skill_id]
         blocks.append(
             f"# Supervisor Skill: {skill_id}\n\n"
             f"{config['route_note']}\n\n"
