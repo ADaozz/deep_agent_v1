@@ -1,0 +1,47 @@
+{
+  "service_name": "batch-operation",
+  "ip": [
+    "10.1.2.10"
+  ],
+  "log_path": "/home/devops/application/batch-operation/logs",
+  "middlewares": [
+    {
+      "name": "MongoDB",
+      "ip": [
+        "10.1.2.6",
+        "10.1.2.7",
+        "10.1.2.8"
+      ]
+    },
+    {
+      "name": "Redis + Redisson",
+      "ip": [
+        "10.1.2.3",
+        "10.1.2.4",
+        "10.1.2.5"
+      ]
+    },
+    {
+      "name": "Kafka",
+      "ip": [
+        "10.1.2.3",
+        "10.1.2.4",
+        "10.1.2.5"
+      ]
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    },
+    {
+      "name": "XXL-JOB, Quartz",
+      "ip": []
+    },
+    {
+      "name": "EhCache",
+      "ip": []
+    }
+  ]
+}

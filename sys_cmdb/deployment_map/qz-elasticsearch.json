@@ -1,0 +1,21 @@
+{
+  "service_name": "qz-elasticsearch",
+  "ip": [
+    "10.1.2.15"
+  ],
+  "log_path": "/home/devops/application/qz-elasticsearch/logs",
+  "middlewares": [
+    {
+      "name": "Elasticsearch",
+      "ip": [
+        "10.1.2.10"
+      ]
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    }
+  ]
+}

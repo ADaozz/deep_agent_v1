@@ -164,11 +164,35 @@ def _decorated_tool_id(node: ast.FunctionDef) -> str:
     return node.name
 
 
+def _extract_custom_tool_metadata(module: ast.Module) -> dict[str, dict[str, Any]]:
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        if node.targets[0].id != "CUSTOM_TOOL_METADATA":
+            continue
+        try:
+            payload = ast.literal_eval(node.value)
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        normalized: dict[str, dict[str, Any]] = {}
+        for key, value in payload.items():
+            if not isinstance(key, str) or not isinstance(value, dict):
+                continue
+            normalized[key] = {str(meta_key): meta_value for meta_key, meta_value in value.items()}
+        return normalized
+    return {}
+
+
 def sniff_custom_tool_descriptors() -> list[ToolDescriptor]:
     if not CUSTOM_TOOLS_SOURCE.exists():
         return []
     source_text = CUSTOM_TOOLS_SOURCE.read_text(encoding="utf-8")
     module = ast.parse(source_text)
+    metadata_map = _extract_custom_tool_metadata(module)
     descriptors: list[ToolDescriptor] = []
     for node in module.body:
         if not isinstance(node, ast.FunctionDef):
@@ -177,12 +201,14 @@ def sniff_custom_tool_descriptors() -> list[ToolDescriptor]:
             continue
         tool_id = _decorated_tool_id(node)
         docstring = _extract_docstring(node)
+        raw_scope = str(metadata_map.get(tool_id, {}).get("scope", "worker")).strip().lower()
+        scope = raw_scope if raw_scope in {"worker", "supervisor", "shared"} else "worker"
         descriptors.append(
             ToolDescriptor(
                 id=tool_id,
                 title=tool_id,
                 subtitle=_extract_summary(docstring, "项目扩展工具。"),
-                scope="worker",
+                scope=scope,
                 source_path="app/tools/custom_tools.py",
                 function_name=node.name,
                 summary=_extract_summary(docstring, "项目扩展工具。"),
@@ -263,7 +289,16 @@ def list_active_worker_tool_ids() -> list[str]:
     active = [item.id for item in PINNED_TOOL_DESCRIPTORS if item.scope == "worker"]
     enabled_map = _read_tool_store()
     for descriptor in sniff_custom_tool_descriptors():
-        if descriptor.scope == "worker" and enabled_map.get(descriptor.id, True):
+        if descriptor.scope in {"worker", "shared"} and enabled_map.get(descriptor.id, True):
+            active.append(descriptor.id)
+    return active
+
+
+def list_active_supervisor_tool_ids() -> list[str]:
+    enabled_map = _read_tool_store()
+    active: list[str] = []
+    for descriptor in sniff_custom_tool_descriptors():
+        if descriptor.scope in {"supervisor", "shared"} and enabled_map.get(descriptor.id, True):
             active.append(descriptor.id)
     return active
 
@@ -271,6 +306,7 @@ def list_active_worker_tool_ids() -> list[str]:
 def load_runtime_tool_bundle() -> dict[str, Any]:
     active_tool_ids = set(list_active_tool_ids())
     active_worker_tool_ids = list_active_worker_tool_ids()
+    active_supervisor_tool_ids = list_active_supervisor_tool_ids()
     custom_descriptors = sniff_custom_tool_descriptors()
     fixed_modules = {
         "supervisor_skill_inspector": _load_module_from_path(
@@ -283,10 +319,15 @@ def load_runtime_tool_bundle() -> dict[str, Any]:
     }
     custom_module = _load_module_from_path("_deep_agent_custom_tools", "app/tools/custom_tools.py") if CUSTOM_TOOLS_SOURCE.exists() else None
     custom_worker_tools: list[Any] = []
+    custom_supervisor_tools: list[Any] = []
     if custom_module is not None:
         for descriptor in custom_descriptors:
             if descriptor.id in active_tool_ids:
-                custom_worker_tools.append(getattr(custom_module, descriptor.runtime_symbol))
+                runtime_tool = getattr(custom_module, descriptor.runtime_symbol)
+                if descriptor.id in active_worker_tool_ids:
+                    custom_worker_tools.append(runtime_tool)
+                if descriptor.id in active_supervisor_tool_ids:
+                    custom_supervisor_tools.append(runtime_tool)
     return {
         "active_tool_list": active_worker_tool_ids,
         "all_active_tool_list": list(active_tool_ids),
@@ -298,4 +339,5 @@ def load_runtime_tool_bundle() -> dict[str, Any]:
         "publish_workspace_file": getattr(fixed_modules["workspace_artifacts"], "publish_workspace_file"),
         "evidence_todo_middleware": getattr(fixed_modules["todo_enforcer"], "EvidenceTodoMiddleware"),
         "custom_worker_tools": custom_worker_tools,
+        "custom_supervisor_tools": custom_supervisor_tools,
     }

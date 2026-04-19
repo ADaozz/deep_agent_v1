@@ -1,0 +1,19 @@
+{
+  "service_name": "common-workbench",
+  "ip": [
+    "10.1.2.10"
+  ],
+  "log_path": "/home/devops/application/common-workbench/logs",
+  "middlewares": [
+    {
+      "name": "MongoDB",
+      "ip": []
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    }
+  ]
+}

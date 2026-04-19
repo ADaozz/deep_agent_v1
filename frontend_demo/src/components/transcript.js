@@ -9,6 +9,7 @@ import {
   formatUtc8Timestamp,
   iconNameForArtifact,
   isActiveWorkerStatus,
+  isIncompleteStopReason,
   statusClass,
   stepLabel,
   stepState,
@@ -231,6 +232,25 @@ export const LogList = {
       <div v-for="(log, index) in logs" :key="(log.time || 'log') + '-' + (log.source || 'source') + '-' + index" class="inline-log">
         <div class="log-meta">{{ log.time }} · {{ log.source }}</div>
         <div>{{ log.message }}</div>
+      </div>
+    </div>
+  `,
+};
+
+export const LoadedSkillList = {
+  props: {
+    skills: { type: Array, default: () => [] },
+  },
+  template: `
+    <div v-if="!skills.length" class="empty-block">bootstrap 阶段未命中额外 supervisor skill。</div>
+    <div v-else class="stack-block">
+      <div v-for="skill in skills" :key="skill.id || skill.name" class="info-card wide">
+        <div class="info-label">{{ skill.name || skill.id }}</div>
+        <div class="info-value">{{ skill.description || '未提供说明。' }}</div>
+        <div class="prompt-meta-tags">
+          <span class="tag prompt-kind-tag is-dynamic">Supervisor Skill</span>
+          <span v-if="skill.source" class="tag">{{ skill.source }}</span>
+        </div>
       </div>
     </div>
   `,
@@ -512,6 +532,7 @@ export const SessionTranscript = {
     EmptyHint,
     FilePreviewContent,
     FinalSummaryContent,
+    LoadedSkillList,
     LogList,
     RoundList,
     SectionTitle,
@@ -530,11 +551,13 @@ export const SessionTranscript = {
     const hasWorkerActivity = computed(() => (state.value.agents || []).some(
       (agent) => agent.current_task_title || agent.report || agent.guard_hits || agent.last_guard_message || (agent.todo_list && agent.todo_list.length)
     ));
+    const terminalIncomplete = computed(() => !props.error && isIncompleteStopReason(state.value.stop_reason));
     return {
       state,
       userFiles,
       completedCount,
       hasWorkerActivity,
+      terminalIncomplete,
       stepState,
       icons,
     };
@@ -544,6 +567,11 @@ export const SessionTranscript = {
       <ChatBubble title="User Query" eyebrow="Input" :icon="icons.MessageSquare" kind="user">
         <ArtifactCardList v-if="userFiles.length" :files="userFiles" :compact="true" :user-upload="true" @open="$emit('open-file', $event)" />
         <div class="user-query-text">{{ session.query }}</div>
+      </ChatBubble>
+
+      <ChatBubble v-if="(state.loaded_skills || []).length" title="Loaded Skills" eyebrow="Bootstrap" :icon="icons.Sparkles">
+        <SectionTitle :icon="icons.Sparkles" title="命中的 Supervisor Skills" :meta="(state.loaded_skills || []).length + ' skill(s)'" />
+        <LoadedSkillList :skills="state.loaded_skills || []" />
       </ChatBubble>
 
       <ChatBubble v-if="(state.tasks || []).length" title="Action List" eyebrow="Execution" :icon="icons.ClipboardList">
@@ -579,10 +607,10 @@ export const SessionTranscript = {
 
       <ChatBubble
         v-if="state.final_summary || error || state.status === 'running'"
-        :title="state.status === 'running' && !state.final_summary ? 'Assistant' : (error || state.status === 'stopped') ? 'Execution Error' : 'Final Summary'"
-        :eyebrow="(error || state.status === 'stopped') ? 'Error' : 'Assistant'"
-        :icon="state.status === 'running' && !state.final_summary ? icons.LoaderCircle : (error || state.status === 'stopped') ? icons.ShieldAlert : icons.Sparkles"
-        :accent="(error || state.status === 'stopped') ? 'is-error' : ''"
+        :title="state.status === 'running' && !state.final_summary ? 'Assistant' : error ? 'Execution Error' : terminalIncomplete ? 'Execution Incomplete' : state.status === 'stopped' ? 'Execution Error' : 'Final Summary'"
+        :eyebrow="error ? 'Error' : terminalIncomplete ? 'Incomplete' : state.status === 'stopped' ? 'Error' : 'Assistant'"
+        :icon="state.status === 'running' && !state.final_summary ? icons.LoaderCircle : error ? icons.ShieldAlert : terminalIncomplete ? icons.Clock3 : state.status === 'stopped' ? icons.ShieldAlert : icons.Sparkles"
+        :accent="error || (state.status === 'stopped' && !terminalIncomplete) ? 'is-error' : ''"
       >
         <div class="final-answer-text">
           <span v-if="state.status === 'running' && !state.final_summary" class="loading-inline">

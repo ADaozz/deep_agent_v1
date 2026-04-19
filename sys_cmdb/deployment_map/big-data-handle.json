@@ -1,0 +1,43 @@
+{
+  "service_name": "big-data-handle",
+  "ip": [
+    "10.1.2.10"
+  ],
+  "log_path": "/home/devops/application/big-data-handle/logs",
+  "middlewares": [
+    {
+      "name": "MongoDB",
+      "ip": [
+        "10.1.2.6",
+        "10.1.2.7",
+        "10.1.2.8"
+      ]
+    },
+    {
+      "name": "Redis",
+      "ip": [
+        "10.1.2.3",
+        "10.1.2.4",
+        "10.1.2.5"
+      ]
+    },
+    {
+      "name": "Kafka",
+      "ip": []
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    },
+    {
+      "name": "XXL-JOB, Quartz",
+      "ip": []
+    },
+    {
+      "name": "EhCache",
+      "ip": []
+    }
+  ]
+}

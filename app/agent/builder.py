@@ -181,6 +181,7 @@ def build_agent_bundle(
         )
     )
     agent_tools.append(runtime_tools["publish_workspace_file"])
+    agent_tools.extend(runtime_tools.get("custom_supervisor_tools") or [])
 
     subagents = [
         {

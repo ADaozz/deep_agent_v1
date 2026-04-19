@@ -1,0 +1,23 @@
+{
+  "service_name": "message-service",
+  "ip": [
+    "10.1.2.11"
+  ],
+  "log_path": "/home/devops/application/message-service/logs",
+  "middlewares": [
+    {
+      "name": "MongoDB",
+      "ip": [
+        "10.1.2.6",
+        "10.1.2.7",
+        "10.1.2.8"
+      ]
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    }
+  ]
+}

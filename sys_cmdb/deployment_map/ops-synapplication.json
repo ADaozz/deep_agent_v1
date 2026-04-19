@@ -1,0 +1,31 @@
+{
+  "service_name": "ops-synapplication",
+  "ip": [
+    "10.1.4.8"
+  ],
+  "log_path": "/home/devops/application/ops-synapplication/logs",
+  "middlewares": [
+    {
+      "name": "MongoDB",
+      "ip": [
+        "10.1.2.6",
+        "10.1.2.7",
+        "10.1.2.8"
+      ]
+    },
+    {
+      "name": "Redis",
+      "ip": [
+        "10.1.2.3",
+        "10.1.2.4",
+        "10.1.2.5"
+      ]
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    }
+  ]
+}

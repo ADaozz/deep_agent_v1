@@ -40,6 +40,7 @@ export function useCenters({
   const skillResetting = ref(false);
   const skillSaveFeedback = ref("");
   const skillSaveFeedbackTone = ref("");
+  let skillFeedbackTimer = 0;
 
   const toolSections = ref([]);
   const toolLoading = ref(false);
@@ -53,6 +54,28 @@ export function useCenters({
   const historyThreadsError = ref("");
   const deletingThreadId = ref("");
   const deleteConfirm = ref({ ...EMPTY_DELETE_CONFIRM });
+
+  function clearSkillFeedback() {
+    if (skillFeedbackTimer) {
+      globalThis.clearTimeout(skillFeedbackTimer);
+      skillFeedbackTimer = 0;
+    }
+    skillSaveFeedback.value = "";
+    skillSaveFeedbackTone.value = "";
+  }
+
+  function showSkillFeedback(message, tone) {
+    clearSkillFeedback();
+    skillSaveFeedback.value = message;
+    skillSaveFeedbackTone.value = tone;
+    if (tone === "success") {
+      skillFeedbackTimer = globalThis.setTimeout(() => {
+        skillSaveFeedback.value = "";
+        skillSaveFeedbackTone.value = "";
+        skillFeedbackTimer = 0;
+      }, 2200);
+    }
+  }
 
   async function loadMeta() {
     try {
@@ -146,6 +169,7 @@ export function useCenters({
   async function loadSkills() {
     skillLoading.value = true;
     skillError.value = "";
+    clearSkillFeedback();
     try {
       const payload = await demoApi.fetchSkills();
       const skills = Array.isArray(payload.skills) ? payload.skills : [];
@@ -188,6 +212,7 @@ export function useCenters({
   }
 
   function openSkillCenter() {
+    clearSkillFeedback();
     uiState.value = normalizeUiState({ ...uiState.value, showSkillModal: true });
     if (!skillSections.value.length && !skillLoading.value) void loadSkills();
   }
@@ -247,11 +272,9 @@ export function useCenters({
       const rawContent = buildRawSkillDocument(activeSkill?.frontmatter || {}, uiState.value.skillDraft);
       const payload = await demoApi.saveSkill(targetId, rawContent);
       skillSections.value = Array.isArray(payload.skills) ? payload.skills : skillSections.value;
-      skillSaveFeedback.value = "Skill 已保存。";
-      skillSaveFeedbackTone.value = "success";
+      showSkillFeedback("Skill 已保存。", "success");
     } catch (saveError) {
-      skillSaveFeedback.value = `保存失败: ${saveError.message}`;
-      skillSaveFeedbackTone.value = "error";
+      showSkillFeedback(`保存失败: ${saveError.message}`, "error");
     } finally {
       skillSaving.value = false;
     }
@@ -266,11 +289,9 @@ export function useCenters({
       skillSections.value = Array.isArray(payload.skills) ? payload.skills : skillSections.value;
       const matched = (payload.skills || []).find((item) => item.id === targetId);
       uiState.value = normalizeUiState({ ...uiState.value, skillDraft: matched?.body || "" });
-      skillSaveFeedback.value = "已恢复默认 Skill。";
-      skillSaveFeedbackTone.value = "success";
+      showSkillFeedback("已恢复默认 Skill。", "success");
     } catch (resetError) {
-      skillSaveFeedback.value = `恢复失败: ${resetError.message}`;
-      skillSaveFeedbackTone.value = "error";
+      showSkillFeedback(`恢复失败: ${resetError.message}`, "error");
     } finally {
       skillResetting.value = false;
     }
@@ -366,6 +387,7 @@ export function useCenters({
   }
 
   function selectSkill(skillId) {
+    clearSkillFeedback();
     uiState.value = normalizeUiState({
       ...uiState.value,
       activeSkillId: skillId,
@@ -374,6 +396,7 @@ export function useCenters({
   }
 
   function updateSkillDraft(content) {
+    clearSkillFeedback();
     uiState.value = normalizeUiState({ ...uiState.value, skillDraft: content });
   }
 
@@ -386,6 +409,7 @@ export function useCenters({
   }
 
   function closeSkillModal() {
+    clearSkillFeedback();
     uiState.value = normalizeUiState({ ...uiState.value, showSkillModal: false });
   }
 

@@ -1,0 +1,19 @@
+{
+  "service_name": "ansible-proxy",
+  "ip": [],
+  "log_path": "./log/ansible-proxy/",
+  "middlewares": [
+    {
+      "name": "Kafka",
+      "ip": []
+    },
+    {
+      "name": "Redis",
+      "ip": []
+    },
+    {
+      "name": "Nacos",
+      "ip": []
+    }
+  ]
+}

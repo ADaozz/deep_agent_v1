@@ -26,6 +26,7 @@ export const EMPTY_STATE = {
   agents: [],
   files: [],
   user_files: [],
+  loaded_skills: [],
   logs: [],
 };
 

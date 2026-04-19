@@ -135,6 +135,7 @@ class DemoRunCollector:
         self.runtime_catalog = list(catalog)
         self.runtime_catalog_by_id: dict[str, dict[str, str]] = {item["id"]: item for item in catalog}
         self.generated_runtime_catalog: list[dict[str, str]] = []
+        self.loaded_skills: list[dict[str, Any]] = []
         self.roster_generated = False
         self.agents: dict[str, AgentPanel] = {}
         self.files: dict[str, PublishedFile] = {}
@@ -191,7 +192,9 @@ class DemoRunCollector:
     ) -> dict[str, Any]:
         final_summary = "".join(self.main_text).strip()
         self._capture_workspace_files_from_summary(final_summary)
-        tasks, task_errors = self._convert_main_todos(final=final)
+        if final and final_summary:
+            self._auto_complete_terminal_main_todo(final_summary)
+        tasks, task_errors, task_pending_issues = self._convert_main_todos(final=final)
 
         if final:
             if error:
@@ -202,6 +205,13 @@ class DemoRunCollector:
                 stop_reason = "Supervisor 主任务状态校验失败：" + "；".join(task_errors[:2])
                 if len(task_errors) > 2:
                     stop_reason += f" 等 {len(task_errors)} 项。"
+            elif task_pending_issues:
+                status = "stopped"
+                stop_reason = "当前主任务尚未完成收口，仍在进一步收集信息：" + "；".join(
+                    task_pending_issues[:2]
+                )
+                if len(task_pending_issues) > 2:
+                    stop_reason += f" 等 {len(task_pending_issues)} 项。"
             else:
                 status = "done" if final_summary else "stopped"
                 stop_reason = (
@@ -228,6 +238,10 @@ class DemoRunCollector:
             if issue not in self.logged_integrity_issues:
                 self._push_log("scheduler", f"主任务状态校验失败: {issue}")
                 self.logged_integrity_issues.add(issue)
+        for issue in task_pending_issues:
+            if issue not in self.logged_integrity_issues:
+                self._push_log("scheduler", f"主任务仍在进一步收集信息: {issue}")
+                self.logged_integrity_issues.add(issue)
 
         if final and status == "done" and self.main_todos and not self.rounds and not self.direct_completion_logged:
             self._push_log("scheduler", "supervisor 直接完成当前任务，未派发子 agent。")
@@ -245,8 +259,34 @@ class DemoRunCollector:
             "rounds": [self._round_to_dict(round_panel) for round_panel in self.rounds],
             "agents": [self._agent_to_dict(agent_id, panel) for agent_id, panel in self.agents.items()],
             "files": [self._file_to_dict(item) for item in self.files.values()],
+            "loaded_skills": self.loaded_skills,
             "logs": self.logs[-60:],
         }
+
+    def _auto_complete_terminal_main_todo(self, final_summary: str) -> None:
+        if not final_summary or not self.main_todos:
+            return
+        unfinished_indexes = [
+            index
+            for index, todo in enumerate(self.main_todos)
+            if _map_todo_status(todo.get("status", "pending")) not in {"done"}
+        ]
+        if len(unfinished_indexes) != 1:
+            return
+        target_index = unfinished_indexes[0]
+        if target_index != len(self.main_todos) - 1:
+            return
+        if any(_task_status_from_runtime_status(agent.status) in {"running", "pending"} for agent in self.agents.values()):
+            return
+        target = self.main_todos[target_index]
+        if _map_todo_status(target.get("status", "pending")) == "done":
+            return
+        target["status"] = "completed"
+        title = str(target.get("label") or f"任务 {target_index + 1}")
+        log_message = f"检测到 supervisor 已产出最终结论，自动闭合尾任务: {title}"
+        if log_message not in self.logged_integrity_issues:
+            self._push_log("scheduler", log_message)
+            self.logged_integrity_issues.add(log_message)
 
     def _handle_updates(self, source: str, ns: tuple[str, ...], data: dict[str, Any]) -> None:
         for node_name, node_data in data.items():
@@ -556,9 +596,12 @@ class DemoRunCollector:
                             conclusion=self.active_round.conclusion,
                         )
 
-    def _convert_main_todos(self, *, final: bool = False) -> tuple[list[dict[str, Any]], list[str]]:
+    def _convert_main_todos(
+        self, *, final: bool = False
+    ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
         tasks: list[dict[str, Any]] = []
         errors: list[str] = []
+        pending_issues: list[str] = []
         for index, todo in enumerate(self.main_todos, start=1):
             title = todo.get("label", "")
             todo_status = _map_todo_status(todo.get("status", "pending"))
@@ -592,9 +635,9 @@ class DemoRunCollector:
                         task_status = "blocked"
                         detail = "对应子任务返回了受阻或部分完成结果。"
                     else:
-                        task_status = "error"
-                        detail = "执行结束时，对应子任务仍未完成。"
-                        errors.append(f"{title or f'任务 {index}'}: 对应子任务未完成")
+                        task_status = "running"
+                        detail = "执行结束时，对应子任务仍在进一步收集信息。"
+                        pending_issues.append(f"{title or f'任务 {index}'}: 对应子任务仍未完成")
                 elif round_status == "done":
                     task_status = "done"
                 elif round_status == "blocked":
@@ -605,9 +648,9 @@ class DemoRunCollector:
                     detail = "对应子任务执行失败或受限。"
                     errors.append(f"{title or f'任务 {index}'}: 对应子任务执行失败或受限")
                 elif round_status == "running":
-                    task_status = "error"
-                    detail = "执行结束时，对应子任务轮次仍未完成。"
-                    errors.append(f"{title or f'任务 {index}'}: 对应子任务轮次未完成")
+                    task_status = "running"
+                    detail = "执行结束时，对应子任务轮次仍在进一步收集信息。"
+                    pending_issues.append(f"{title or f'任务 {index}'}: 对应子任务轮次仍未完成")
                 elif _has_prior_blocking_result(index, self.task_bindings, self.agents):
                     task_status = "blocked"
                     detail = "前置子任务已给出否定结果，本任务未继续执行。"
@@ -616,9 +659,9 @@ class DemoRunCollector:
                     owner = owner or "Supervisor"
                     detail = "该主任务已由 supervisor 收口完成。"
                 else:
-                    task_status = "error"
-                    detail = "执行结束时该主任务仍未完成。"
-                    errors.append(
+                    task_status = "running"
+                    detail = "执行结束时该主任务仍在进一步收集信息。"
+                    pending_issues.append(
                         f"{title or f'任务 {index}'}: 执行结束时状态仍为 {todo.get('status', 'pending')}"
                     )
 
@@ -633,7 +676,7 @@ class DemoRunCollector:
                     "last_round": round_index,
                 }
             )
-        return tasks, errors
+        return tasks, errors, pending_issues
 
     def _round_to_dict(self, round_panel: RoundPanel) -> dict[str, Any]:
         return {
@@ -833,7 +876,7 @@ class DemoRunCollector:
         if agent.worker_error == normalized:
             return
         agent.worker_error = normalized
-        agent.status = "error"
+        agent.status = "blocked"
         detail = normalized.get("message") or normalized.get("error_type") or "未知异常"
         self._push_log(agent.name, f"捕获到 worker 运行异常: {short_text(detail, 160)}")
         self._write_event(
@@ -968,6 +1011,9 @@ def run_demo_session_stream(
     collector = DemoRunCollector(log_file=settings.log_file, runtime_catalog=[])
     collector.status = "running"
     collector.log_session_start(query=query, max_rounds=max_rounds, model=settings.model, mode="stream")
+    collector._push_log("scheduler", f"已接收用户请求: {short_text(query, 160)}")
+    if user_files:
+        collector._push_log("scheduler", f"已接收用户文件: {len(user_files)} 个，正在整理为本轮上下文。")
     collector._push_log("scheduler", "正在准备执行环境，构建 supervisor、worker 名册与运行时工具。")
     last_signature = ""
     effective_query = (agent_query or query).strip()
@@ -1005,6 +1051,7 @@ def run_demo_session_stream(
         agent, runtime_catalog, bootstrap_meta = build_agent_bundle(settings=settings, query=effective_query)
         collector.runtime_catalog = list(runtime_catalog)
         collector.runtime_catalog_by_id = {item["id"]: item for item in runtime_catalog}
+        collector.loaded_skills = list(bootstrap_meta.get("selected_skill_headers") or [])
         selected_skill_ids = bootstrap_meta.get("selected_skill_ids") or []
         if selected_skill_ids:
             collector._push_log(

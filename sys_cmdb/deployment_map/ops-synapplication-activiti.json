@@ -1,0 +1,27 @@
+{
+  "service_name": "ops-synapplication-activiti",
+  "ip": [
+    "10.1.4.8"
+  ],
+  "log_path": "/home/devops/application/ops-synapplication-activiti/logs",
+  "middlewares": [
+    {
+      "name": "MongoDB",
+      "ip": [
+        "10.1.2.6",
+        "10.1.2.7",
+        "10.1.2.8"
+      ]
+    },
+    {
+      "name": "Redis",
+      "ip": []
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    }
+  ]
+}

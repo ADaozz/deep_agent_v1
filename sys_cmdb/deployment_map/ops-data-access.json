@@ -1,0 +1,19 @@
+{
+  "service_name": "ops-data-access",
+  "ip": [
+    "10.1.2.11"
+  ],
+  "log_path": "/home/devops/application/ops-data-access/logs",
+  "middlewares": [
+    {
+      "name": "Redis",
+      "ip": []
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    }
+  ]
+}

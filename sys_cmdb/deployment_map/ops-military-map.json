@@ -1,0 +1,23 @@
+{
+  "service_name": "ops-military-map",
+  "ip": [
+    "10.1.2.10"
+  ],
+  "log_path": "/home/devops/application/ops-military-map/logs",
+  "middlewares": [
+    {
+      "name": "Redis",
+      "ip": [
+        "10.1.2.3",
+        "10.1.2.4",
+        "10.1.2.5"
+      ]
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    }
+  ]
+}

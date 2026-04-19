@@ -6,6 +6,7 @@ import {
   cloneBaseState,
   createThreadId,
   isActiveWorkerStatus,
+  isIncompleteStopReason,
   mergeSessionState,
   normalizeSessionState,
   normalizeUiState,
@@ -43,7 +44,13 @@ export function useSessionRuntime({
     () => demoState.value.agents.filter((agent) => isActiveWorkerStatus(agent.status)).length
   );
   const headerStatus = computed(() => {
-    if (error.value || demoState.value.status === "stopped") {
+    if (error.value) {
+      return { label: "错误", icon: icons.ShieldAlert, tone: "error" };
+    }
+    if (demoState.value.status === "stopped") {
+      if (isIncompleteStopReason(demoState.value.stop_reason)) {
+        return { label: "进一步收集信息", icon: icons.Clock3, tone: "pending" };
+      }
       return { label: "错误", icon: icons.ShieldAlert, tone: "error" };
     }
     if (demoState.value.status === "running") {
@@ -122,7 +129,7 @@ export function useSessionRuntime({
     pendingUserFiles.value = [];
 
     try {
-      await demoApi
+      demoApi
         .saveSessionDraft({
           thread_id: threadId.value,
           session_id: sessionId,

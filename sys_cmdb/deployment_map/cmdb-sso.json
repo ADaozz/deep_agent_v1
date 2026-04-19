@@ -1,0 +1,23 @@
+{
+  "service_name": "cmdb-sso",
+  "ip": [
+    "10.1.2.15"
+  ],
+  "log_path": "/home/devops/application/cmdb-sso/logs",
+  "middlewares": [
+    {
+      "name": "Redis",
+      "ip": [
+        "10.1.2.3",
+        "10.1.2.4",
+        "10.1.2.5"
+      ]
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    }
+  ]
+}

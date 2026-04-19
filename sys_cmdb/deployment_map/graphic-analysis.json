@@ -1,0 +1,27 @@
+{
+  "service_name": "graphic-analysis",
+  "ip": [
+    "10.1.2.12"
+  ],
+  "log_path": "/home/devops/application/graphic-analysis/logs",
+  "middlewares": [
+    {
+      "name": "Redis + Redisson",
+      "ip": [
+        "10.1.2.3",
+        "10.1.2.4",
+        "10.1.2.5"
+      ]
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    },
+    {
+      "name": "EhCache",
+      "ip": []
+    }
+  ]
+}

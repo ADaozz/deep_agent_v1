@@ -1,0 +1,19 @@
+{
+  "service_name": "scheduled-proxy",
+  "ip": [
+    "10.1.2.12"
+  ],
+  "log_path": "/home/devops/application/scheduled-proxy/logs",
+  "middlewares": [
+    {
+      "name": "XXL-JOB, Quartz",
+      "ip": []
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    }
+  ]
+}

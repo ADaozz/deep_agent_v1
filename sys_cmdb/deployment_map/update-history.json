@@ -1,0 +1,39 @@
+{
+  "service_name": "update-history",
+  "ip": [
+    "10.1.2.12"
+  ],
+  "log_path": "/home/devops/application/update-history/logs",
+  "middlewares": [
+    {
+      "name": "MongoDB",
+      "ip": [
+        "10.1.2.6",
+        "10.1.2.7",
+        "10.1.2.8"
+      ]
+    },
+    {
+      "name": "Redis",
+      "ip": [
+        "10.1.2.3",
+        "10.1.2.4",
+        "10.1.2.5"
+      ]
+    },
+    {
+      "name": "Kafka",
+      "ip": []
+    },
+    {
+      "name": "Nacos (namespace: cmdb)",
+      "ip": [
+        "10.1.2.6"
+      ]
+    },
+    {
+      "name": "EhCache",
+      "ip": []
+    }
+  ]
+}

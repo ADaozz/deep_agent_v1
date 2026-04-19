@@ -130,6 +130,7 @@ export function cloneBaseState() {
     agents: [],
     files: [],
     user_files: [],
+    loaded_skills: [],
     logs: [],
   };
 }
@@ -163,6 +164,7 @@ export function normalizeSessionState(snapshot = {}) {
     agents: Array.isArray(snapshot?.agents) ? snapshot.agents.map((agent) => normalizeAgent(agent)) : [],
     files: Array.isArray(snapshot?.files) ? snapshot.files : [],
     user_files: Array.isArray(snapshot?.user_files) ? snapshot.user_files : [],
+    loaded_skills: Array.isArray(snapshot?.loaded_skills) ? snapshot.loaded_skills : [],
     logs: Array.isArray(snapshot?.logs) ? snapshot.logs : [],
   };
 }
@@ -384,6 +386,12 @@ export function stepLabel(status) {
   if (value === "success") return "已完成";
   if (value === "error") return "错误";
   return "待处理";
+}
+
+export function isIncompleteStopReason(reason = "") {
+  const text = String(reason || "");
+  if (!text) return false;
+  return text.includes("仍在进一步收集信息") || text.includes("尚未完成收口");
 }
 
 export function statusClass(status) {

@@ -100,6 +100,7 @@ Excel / 表格类文件预览：
 - 支持按 query 动态生成专属 worker
 - 支持前端提示词管理中心：预览、编辑、保存、恢复默认
 - 支持前端 Skill 管理中心：与 prompt 分离管理，单独预览 YAML 头属性、正文编辑、保存与恢复默认
+- 支持自动扫描 `skill/*/SKILL.md`，新增 supervisor skill 无需再手工登记
 - 支持将 `workspace/` 内文件发布为前端文件卡片，并在会话中预览 / 下载 / 文本类文件保存
 - 支持把生成结果直接作为会话内文件卡片展示，便于用户在一次运行结束后立刻查看 Markdown / 文本类 / 表格类产物
 - 支持 Markdown / Mermaid 格式的最终回答渲染
@@ -303,12 +304,13 @@ flowchart LR
 - `app/tools/custom_tools.py`
   - 统一管理可开关的项目扩展工具
   - 后端会自动嗅探其中被 `@tool` 修饰的函数并展示到工具控制台
-  - 当前包含 `ssh_execute(host_ip, command)` 和 `tavily_search(...)`
-  - 这类扩展工具默认只暴露给 worker，不暴露给 supervisor
+  - 当前包含 `ssh_execute(host_ip, command)`、`tavily_search(...)`、`resolve_cmdb_service_context(query)`
+  - 工具的 `scope` 直接在源码里的 `CUSTOM_TOOL_METADATA` 声明，不再在 registry 中单独维护 override
 
 - `app/tool_registry.py`
   - 工具控制台的后端注册中心
   - 负责区分 pinned supervisor/worker 工具与 `custom_tools.py` 中可动态嗅探的扩展工具
+  - 负责从 `custom_tools.py` 读取工具元数据（例如 `scope=worker/supervisor/shared`）
   - 负责维护 `runtime_logs/tool_controls.json`，并向前端返回工具开关状态
 
 - `app/prompts.py`
@@ -962,6 +964,12 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
   - 适合需要外部互联网信息、新闻、官网资料或公开网页来源的取证任务
   - 当前只暴露给 worker，作为“外部检索能力”使用
 
+- `resolve_cmdb_service_context(query)`
+  - 不是框架默认工具
+  - 由 [custom_tools.py](app/tools/custom_tools.py) 提供，并可在工具控制台开关
+  - 内部会读取 `sys_cmdb/CMDB.md`，抽取与 query 相关的服务及一跳上下游，再到 `sys_cmdb/deployment_map/*.json` 匹配部署信息
+  - 当前通过 `scope=shared` 同时暴露给 supervisor 和 worker
+
 - `publish_workspace_file(relative_path, title="")`
   - 不是框架默认工具
   - 由 [workspace_artifacts.py](app/tools/workspace_artifacts.py) 提供
@@ -1035,6 +1043,11 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
   - 强调先想清楚、最小改动、避免过度设计与可验证闭环
   - 当前作为 supervisor skill 使用，不绑定工具
 
+- [SKILL.md](skill/fault_localization/SKILL.md)
+  - 适用于故障定位、根因分析、异常排查、告警分析与日志分析等场景
+  - 强调从候选服务出发，结合时间窗、上下游一跳与证据收敛快速定位问题
+  - 当前作为 supervisor skill 使用，不绑定工具
+
 左侧“Skill”按钮打开后，可以直接在前端：
 
 - 单独查看 skill 列表，不和 prompt 混在一起
@@ -1056,7 +1069,9 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 - 然后由 skill 选择器只挑出当前真正相关的 supervisor skill，并把这些 skill 全文注入最终 supervisor system prompt
 - 如果当前 query 不需要额外 supervisor skill，也允许一个都不注入
 - 该 skill 只增强研究判断框架，不替换 supervisor 的调度、工具边界、worker evidence checklist 等底座规则
-- 前端保存后的 skill 内容会在当前后端进程内热更新；重启服务后会重新从 `skill/<skill_name>/SKILL.md` 加载默认内容
+- 后端会自动扫描 `skill/*/SKILL.md` 并过滤出 supervisor skill；默认按 `skill_scope=supervisor` 处理，没写时也按 supervisor 看待
+- 前端保存后的 skill 内容会在当前后端进程内热更新；重启服务后仍会重新从 `skill/<skill_name>/SKILL.md` 读取
+- 会话运行时会把本轮命中的 supervisor skills 写入日志，并通过 `loaded_skills` 状态字段推给前端显示
 
 ### 4. 文件产物卡片
 

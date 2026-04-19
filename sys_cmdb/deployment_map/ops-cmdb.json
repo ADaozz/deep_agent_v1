@@ -1,0 +1,43 @@
+{
+  "service_name": "ops-cmdb",
+  "ip": [
+    "10.1.2.13"
+  ],
+  "log_path": "/home/devops/application/ops-cmdb/logs/ops-cmdb/",
+  "middlewares": [
+    {
+      "name": "MongoDB（commondb, cmdb, script, acquisitioncmdb）",
+      "ip": [
+        "10.1.2.6",
+        "10.1.2.7",
+        "10.1.2.8"
+      ]
+    },
+    {
+      "name": "Redis + Redisson",
+      "ip": [
+        "10.1.2.3",
+        "10.1.2.4",
+        "10.1.2.5"
+      ]
+    },
+    {
+      "name": "Kafka",
+      "ip": []
+    },
+    {
+      "name": "Nacos (namespace: cmdb)",
+      "ip": [
+        "10.1.2.6"
+      ]
+    },
+    {
+      "name": "XXL-JOB, Quartz",
+      "ip": []
+    },
+    {
+      "name": "EhCache",
+      "ip": []
+    }
+  ]
+}

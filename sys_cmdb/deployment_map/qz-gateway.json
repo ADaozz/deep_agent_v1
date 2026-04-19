@@ -1,0 +1,23 @@
+{
+  "service_name": "qz-gateway",
+  "ip": [
+    "10.1.2.14"
+  ],
+  "log_path": "/home/devops/application/qz-gateway/logs",
+  "middlewares": [
+    {
+      "name": "Redis",
+      "ip": [
+        "10.1.2.3",
+        "10.1.2.4",
+        "10.1.2.5"
+      ]
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    }
+  ]
+}

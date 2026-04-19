@@ -1,0 +1,27 @@
+{
+  "service_name": "ops-script-repertory",
+  "ip": [
+    "10.1.2.13"
+  ],
+  "log_path": "/home/devops/application/ops-script-repertory/logs",
+  "middlewares": [
+    {
+      "name": "MongoDB, MySQL (MyBatis)",
+      "ip": []
+    },
+    {
+      "name": "Kafka",
+      "ip": []
+    },
+    {
+      "name": "Nacos",
+      "ip": [
+        "10.1.2.6"
+      ]
+    },
+    {
+      "name": "Quartz",
+      "ip": []
+    }
+  ]
+}

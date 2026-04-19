@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import glob
 import json
 import shlex
+from functools import lru_cache
+from pathlib import Path
 
 from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from pydantic import BaseModel, Field
 
-from app.config import env_bool, env_int, env_str
+from app.config import PROJECT_ROOT, env_bool, env_int, env_str
+
+
+CUSTOM_TOOL_METADATA = {
+    "resolve_cmdb_service_context": {"scope": "shared"},
+    "tavily_search": {"scope": "worker"},
+    "ssh_execute": {"scope": "worker"},
+}
 
 
 def _split_domains(raw_domains: str) -> list[str]:
@@ -67,6 +79,164 @@ def _format_tavily_failure(query: str, failures: list[str]) -> str:
         f"query: {query}\n"
         f"output:\n{failure_text}"
     )
+
+
+CMDB_ROOT = PROJECT_ROOT / "sys_cmdb"
+CMDB_MARKDOWN = CMDB_ROOT / "CMDB.md"
+DEPLOYMENT_MAP_ROOT = CMDB_ROOT / "deployment_map"
+
+
+class RelatedService(BaseModel):
+    service_name: str = Field(description="与 query 相关的服务名，必须与 CMDB 中服务名一致。")
+    upstream_services: list[str] = Field(default_factory=list, description="该服务在当前问题语境下的一跳上游服务名。")
+    downstream_services: list[str] = Field(default_factory=list, description="该服务在当前问题语境下的一跳下游服务名。")
+
+
+class CmdbServiceSelection(BaseModel):
+    services: list[RelatedService] = Field(default_factory=list, description="与 query 最相关的服务及其一跳上下游。")
+    reasoning: str = Field(default="", description="为什么这些服务与 query 相关。")
+
+
+CmdbServiceSelection.model_rebuild()
+
+
+def _make_internal_llm() -> ChatOpenAI:
+    api_key = env_str("OPENAI_API_KEY") or env_str("DASHSCOPE_API_KEY")
+    base_url = env_str("OPENAI_BASE_URL") or env_str("DASHSCOPE_BASE_URL")
+    model = env_str("OPENAI_MODEL") or env_str("DASHSCOPE_MODEL") or "gpt-4o-mini"
+    if not api_key:
+        raise RuntimeError("模型凭据未配置。")
+    kwargs = {
+        "model": model,
+        "api_key": api_key,
+        "timeout": max(30, env_int("DEEP_AGENT_MODEL_TIMEOUT", 300)),
+        "max_retries": max(0, env_int("DEEP_AGENT_MODEL_MAX_RETRIES", 2)),
+    }
+    if base_url:
+        kwargs["base_url"] = base_url
+    return ChatOpenAI(**kwargs)
+
+
+@lru_cache(maxsize=1)
+def _read_cmdb_markdown() -> str:
+    if not CMDB_MARKDOWN.exists():
+        raise FileNotFoundError(f"CMDB 文件不存在: {CMDB_MARKDOWN}")
+    return CMDB_MARKDOWN.read_text(encoding="utf-8")
+
+
+@lru_cache(maxsize=1)
+def _load_deployment_map() -> dict[str, dict]:
+    if not DEPLOYMENT_MAP_ROOT.exists():
+        raise FileNotFoundError(f"deployment_map 目录不存在: {DEPLOYMENT_MAP_ROOT}")
+    mapping: dict[str, dict] = {}
+    for file_path in sorted(glob.glob(str(DEPLOYMENT_MAP_ROOT / "*.json"))):
+        path = Path(file_path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        service_name = str(payload.get("service_name", "")).strip()
+        if service_name:
+            mapping[service_name] = payload
+    return mapping
+
+
+def _dedupe_service_names(names: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in names:
+        normalized = str(item).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
+def _normalize_service_relation(item: RelatedService) -> dict[str, object]:
+    service_name = item.service_name.strip()
+    upstream = _dedupe_service_names(item.upstream_services)
+    downstream = _dedupe_service_names(item.downstream_services)
+    upstream = [name for name in upstream if name != service_name]
+    downstream = [name for name in downstream if name != service_name]
+    return {
+        "service_name": service_name,
+        "upstream_services": upstream,
+        "downstream_services": downstream,
+    }
+
+
+@tool
+def resolve_cmdb_service_context(query: str) -> str:
+    """根据用户问题从 CMDB 中提取相关服务，并补全一跳上下游与部署信息。
+
+    何时使用：
+    - 用户问题涉及系统、服务、链路、故障、调用关系、部署位置、日志位置或上下游依赖。
+    - 需要先从 CMDB 中确定问题相关的服务集合，再继续做排障、巡检或关系分析。
+
+    使用规则：
+    - 只接受一个自然语言 `query`。
+    - 内部会读取 `sys_cmdb/CMDB.md`，提取与 query 相关的服务名以及一跳上下游服务。
+    - 服务名必须使用 CMDB 中出现的标准名称，不要自行编造别名。
+    - 提取出的服务会再去 `sys_cmdb/deployment_map/*.json` 匹配部署信息。
+
+    返回：
+    - JSON 字符串，包含 matched_service_names、services、deployment_missing_services 和 reasoning。
+    - 每个 service 节点都会带 upstream_services、downstream_services 和 deployment 信息。
+    """
+    cleaned_query = query.strip()
+    if not cleaned_query:
+        return "resolve_cmdb_service_context 失败：缺少 query。"
+
+    try:
+        cmdb_markdown = _read_cmdb_markdown()
+        deployment_map = _load_deployment_map()
+        llm = _make_internal_llm()
+    except Exception as exc:  # noqa: BLE001
+        return f"resolve_cmdb_service_context 失败：{type(exc).__name__}: {exc}"
+
+    structured_llm = llm.with_structured_output(CmdbServiceSelection)
+    prompt = (
+        "你正在从 CMDB 文档中为一个排障/架构问题抽取相关服务。\n"
+        "要求：\n"
+        "1. 只返回 CMDB 文档里真实出现的标准服务名。\n"
+        "2. 先找与 query 直接相关的核心服务，再补充这些核心服务的一跳上游和一跳下游。\n"
+        "3. 不要返回中间件名称、数据库名称、产品名、页面标题；只返回服务名。\n"
+        "4. upstream_services / downstream_services 只保留一跳，不要扩散成全链路。\n"
+        "5. 如果 query 太模糊，尽量返回最可能相关的少量服务，不要泛化整个系统。\n\n"
+        f"用户 query:\n{cleaned_query}\n\n"
+        f"CMDB 文档:\n{cmdb_markdown}"
+    )
+
+    try:
+        selection = structured_llm.invoke(prompt)
+    except Exception as exc:  # noqa: BLE001
+        return f"resolve_cmdb_service_context 失败：LLM 解析 CMDB 时出错: {type(exc).__name__}: {exc}"
+
+    normalized_services = []
+    matched_names: list[str] = []
+    deployment_missing_services: list[str] = []
+    for item in selection.services:
+        normalized = _normalize_service_relation(item)
+        service_name = str(normalized["service_name"]).strip()
+        if not service_name:
+            continue
+        matched_names.append(service_name)
+        deployment = deployment_map.get(service_name)
+        if deployment is None:
+            deployment_missing_services.append(service_name)
+        normalized_services.append(
+            {
+                **normalized,
+                "deployment": deployment,
+            }
+        )
+
+    payload = {
+        "query": cleaned_query,
+        "matched_service_names": _dedupe_service_names(matched_names),
+        "services": normalized_services,
+        "deployment_missing_services": _dedupe_service_names(deployment_missing_services),
+        "reasoning": selection.reasoning,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 @tool
