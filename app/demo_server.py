@@ -25,6 +25,17 @@ from app.chat_history_store import (
 )
 from app.config import load_settings
 from app.demo_session import run_demo_session_stream
+from app.heartbeat_scheduler import HeartbeatScheduler
+from app.heartbeat_scheduler import execute_heartbeat_task_async
+from app.heartbeat_store import (
+    delete_heartbeat_task,
+    ensure_heartbeat_schema,
+    get_heartbeat_task,
+    list_heartbeat_runs,
+    list_heartbeat_tasks,
+    start_heartbeat_task_now,
+    update_heartbeat_enabled,
+)
 from app.prompts import get_prompt_sections, reset_prompt_section, update_prompt_section
 from app.skill_store import list_skill_sections, reset_skill_section, update_skill_section
 from app.tool_registry import (
@@ -70,6 +81,12 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/demo/thread-state":
             self._handle_update_thread_state()
+            return
+        if self.path == "/api/demo/heartbeats/toggle":
+            self._handle_toggle_heartbeat()
+            return
+        if self.path == "/api/demo/heartbeats/run-now":
+            self._handle_run_heartbeat_now()
             return
         if self.path == "/api/demo/workspace-file":
             self._handle_update_workspace_file()
@@ -311,6 +328,66 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
 
         self._send_json({"ok": True, "tool": tool_payload, "tools": list_tool_controls()}, status=HTTPStatus.OK)
 
+    def _handle_toggle_heartbeat(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length) if content_length else b"{}"
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._send_json({"error": "invalid_json"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        task_id = str(payload.get("task_id", "")).strip()
+        enabled = payload.get("enabled")
+        if not task_id:
+            self._send_json({"error": "task_id_required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not isinstance(enabled, bool):
+            self._send_json({"error": "enabled_must_be_boolean"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        settings = load_settings(argv=[])
+        task = update_heartbeat_enabled(settings=settings, task_id=task_id, enabled=enabled)
+        if not task:
+            self._send_json({"error": "heartbeat_task_not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+        self._send_json({"ok": True, "task": task, "tasks": list_heartbeat_tasks(settings)}, status=HTTPStatus.OK)
+
+    def _handle_run_heartbeat_now(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length) if content_length else b"{}"
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._send_json({"error": "invalid_json"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        task_id = str(payload.get("task_id", "")).strip()
+        if not task_id:
+            self._send_json({"error": "task_id_required"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        settings = load_settings(argv=[])
+        try:
+            task = start_heartbeat_task_now(settings=settings, task_id=task_id)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        if not task:
+            self._send_json({"error": "heartbeat_task_not_found"}, status=HTTPStatus.NOT_FOUND)
+            return
+
+        execute_heartbeat_task_async(settings, task)
+        self._send_json(
+            {
+                "ok": True,
+                "task": get_heartbeat_task(settings=settings, task_id=task_id),
+                "tasks": list_heartbeat_tasks(settings),
+                "runs": list_heartbeat_runs(settings=settings, task_id=task_id, limit=10),
+            },
+            status=HTTPStatus.OK,
+        )
+
     def _handle_update_workspace_file(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
         raw_body = self.rfile.read(content_length) if content_length else b"{}"
@@ -435,6 +512,21 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
                 return
             self._send_json(payload, status=HTTPStatus.OK)
             return
+        if parsed.path == "/api/demo/heartbeats":
+            settings = load_settings(argv=[])
+            params = parse_qs(parsed.query)
+            task_id = (params.get("task_id") or [""])[0].strip()
+            if task_id:
+                self._send_json(
+                    {
+                        "tasks": list_heartbeat_tasks(settings),
+                        "runs": list_heartbeat_runs(settings=settings, task_id=task_id, limit=10),
+                    },
+                    status=HTTPStatus.OK,
+                )
+            else:
+                self._send_json({"tasks": list_heartbeat_tasks(settings)}, status=HTTPStatus.OK)
+            return
         if parsed.path == "/api/demo/history":
             settings = load_settings(argv=[])
             params = parse_qs(parsed.query)
@@ -469,6 +561,16 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/demo/user-file":
             self._handle_delete_user_file(parsed)
+            return
+        if parsed.path == "/api/demo/heartbeats":
+            settings = load_settings(argv=[])
+            params = parse_qs(parsed.query)
+            task_id = (params.get("task_id") or [""])[0].strip()
+            if not task_id:
+                self._send_json({"error": "task_id_required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            deleted = delete_heartbeat_task(settings=settings, task_id=task_id)
+            self._send_json({"ok": deleted, "task_id": task_id}, status=HTTPStatus.OK if deleted else HTTPStatus.NOT_FOUND)
             return
         if parsed.path != "/api/demo/history":
             self.send_error(HTTPStatus.NOT_FOUND, "Unknown API endpoint")
@@ -960,6 +1062,7 @@ def _infer_text_width_px(text: str) -> int:
 def run_demo_server(host: str = "127.0.0.1", port: int = 8080) -> None:
     settings = load_settings(argv=[])
     ensure_chat_history_schema(settings)
+    ensure_heartbeat_schema(settings)
     if settings.backend == "docker":
         validate_docker_backend_access(
             container_name=settings.docker_container_name,
@@ -967,6 +1070,8 @@ def run_demo_server(host: str = "127.0.0.1", port: int = 8080) -> None:
             timeout=min(settings.docker_timeout, 10),
         )
 
+    heartbeat_scheduler = HeartbeatScheduler(settings)
+    heartbeat_scheduler.start()
     server = ThreadingHTTPServer((host, port), DemoRequestHandler)
     print(f"Demo server listening on http://{host}:{port}")
     print("POST /api/demo/run 会执行真实 create_deep_agent 调度。")
@@ -980,4 +1085,5 @@ def run_demo_server(host: str = "127.0.0.1", port: int = 8080) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        heartbeat_scheduler.stop()
         server.server_close()

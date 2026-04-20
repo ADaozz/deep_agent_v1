@@ -83,6 +83,32 @@ export const demoApi = {
   fetchTools() {
     return requestJson({ url: "/api/demo/tools", method: "GET" });
   },
+  fetchHeartbeats(taskId = "") {
+    return requestJson({
+      url: taskId ? `/api/demo/heartbeats?task_id=${encodeURIComponent(taskId)}` : "/api/demo/heartbeats",
+      method: "GET",
+    });
+  },
+  toggleHeartbeat(taskId, enabled) {
+    return requestJson({
+      url: "/api/demo/heartbeats/toggle",
+      method: "POST",
+      data: { task_id: taskId, enabled },
+    });
+  },
+  runHeartbeatNow(taskId) {
+    return requestJson({
+      url: "/api/demo/heartbeats/run-now",
+      method: "POST",
+      data: { task_id: taskId },
+    });
+  },
+  deleteHeartbeat(taskId) {
+    return requestJson({
+      url: `/api/demo/heartbeats?task_id=${encodeURIComponent(taskId)}`,
+      method: "DELETE",
+    });
+  },
   toggleTool(id, enabled) {
     return requestJson({
       url: "/api/demo/tools/toggle",

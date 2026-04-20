@@ -25,8 +25,10 @@
    - 可以直接看到用户提问、Action List、Worker 协作、Round 收敛、Execution Log、Final Summary、文件卡片的完整链路
 3. `img/文件预览md.png` 和 `img/文件预览xlsx.png`
    - 分别展示文本类文件与表格类文件在前端的预览形态
-4. `img/提示词管理.png` 和 `img/工具控制.png`
-   - 分别展示提示词管理中心、工具控制台，以及当前左侧控制栏的管理入口风格
+4. `img/提示词管理.png`、`img/skill管理.png`、`img/工具控制.png`、`img/历史记录.png`
+   - 分别展示提示词管理中心、Skill 管理中心、工具控制台、历史会话中心，以及当前左侧控制栏的管理入口风格
+5. `img/智能心跳.png`
+   - 展示 Heartbeat / 智能心跳面板，包括任务列表、最近状态、调度信息和最近摘要
 
 如果你的目标是先判断这个项目值不值得 clone，优先看 `Supervisor Conversation Runtime.html`。它比单张截图更能说明整个系统到底“怎么跑”。
 
@@ -38,17 +40,29 @@
 
 ![主页效果图（主题2）](img/主题2.jpg)
 
-## 提示词与工具管理效果图
+## 管理中心效果图
 
-下面两张截图展示左侧控制栏中的提示词管理中心和工具控制台。
+下面几张截图展示左侧控制栏中的提示词管理、Skill 管理、工具控制、历史会话与智能心跳。
 
 提示词管理中心：
 
 ![提示词管理效果图](img/提示词管理.png)
 
+Skill 管理中心：
+
+![Skill 管理效果图](img/skill管理.png)
+
 工具控制台：
 
 ![工具控制效果图](img/工具控制.png)
+
+历史会话中心：
+
+![历史会话效果图](img/历史记录.png)
+
+智能心跳中心：
+
+![智能心跳效果图](img/智能心跳.png)
 
 ## 文件预览效果图
 
@@ -100,6 +114,7 @@ Excel / 表格类文件预览：
 - 支持按 query 动态生成专属 worker
 - 支持前端提示词管理中心：预览、编辑、保存、恢复默认
 - 支持前端 Skill 管理中心：与 prompt 分离管理，单独预览 YAML 头属性、正文编辑、保存与恢复默认
+- 支持前端 Heartbeat / 智能心跳中心：查看定时任务、启停任务、立即触发、查看最近状态 / 调度信息 / 最近摘要
 - 支持自动扫描 `skill/*/SKILL.md`，新增 supervisor skill 无需再手工登记
 - 支持将 `workspace/` 内文件发布为前端文件卡片，并在会话中预览 / 下载 / 文本类文件保存
 - 支持把生成结果直接作为会话内文件卡片展示，便于用户在一次运行结束后立刻查看 Markdown / 文本类 / 表格类产物
@@ -304,7 +319,7 @@ flowchart LR
 - `app/tools/custom_tools.py`
   - 统一管理可开关的项目扩展工具
   - 后端会自动嗅探其中被 `@tool` 修饰的函数并展示到工具控制台
-  - 当前包含 `ssh_execute(host_ip, command)`、`tavily_search(...)`、`resolve_cmdb_service_context(query)`、`send_email_with_attachment(target_email, html_body, attachment_path)`
+  - 当前包含 `ssh_execute(host_ip, command)`、`tavily_search(...)`、`resolve_cmdb_service_context(query)`、`send_email_with_attachment(target_email, html_body, attachment_paths)`
   - 工具的 `scope` 直接在源码里的 `CUSTOM_TOOL_METADATA` 声明，不再在 registry 中单独维护 override
 
 - `app/tool_registry.py`
@@ -970,11 +985,12 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
   - 内部会读取 `sys_cmdb/CMDB.md`，抽取与 query 相关的服务及一跳上下游，再到 `sys_cmdb/deployment_map/*.json` 匹配部署信息
   - 当前通过 `scope=shared` 同时暴露给 supervisor 和 worker
 
-- `send_email_with_attachment(target_email, html_body, attachment_path)`
+- `send_email_with_attachment(target_email, html_body, attachment_paths)`
   - 不是框架默认工具
   - 由 [custom_tools.py](app/tools/custom_tools.py) 提供，并可在工具控制台开关
-  - 使用 SMTP SSL 发送 HTML 邮件，并附带单个项目目录内附件
+  - 使用 SMTP SSL 发送 HTML 邮件，并附带一个或多个当前文件根目录内的附件
   - 当前通过 `scope=supervisor` 只暴露给 supervisor
+  - 文件路径统一使用当前文件根目录下的相对路径，例如 `report.md`、`subdir/report.md`
   - 适合报告通知、结果投递、附件发送这类最终交付动作
 
 - `publish_workspace_file(relative_path, title="")`
@@ -1057,10 +1073,9 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 
 左侧“Skill”按钮打开后，可以直接在前端：
 
-- 单独查看 skill 列表，不和 prompt 混在一起
-- 查看 skill 类型标签，例如 `Supervisor Skill`
-- 预览 YAML 头属性
-- 直接编辑正文
+- 查看已加载的 supervisor skill 列表
+- 预览 frontmatter / YAML 头属性
+- 编辑正文内容
 - 保存 skill
 - 恢复默认 skill
 
@@ -1080,7 +1095,40 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 - 前端保存后的 skill 内容会在当前后端进程内热更新；重启服务后仍会重新从 `skill/<skill_name>/SKILL.md` 读取
 - 会话运行时会把本轮命中的 supervisor skills 写入日志，并通过 `loaded_skills` 状态字段推给前端显示
 
-### 4. 文件产物卡片
+### 4. 智能心跳中心
+
+左侧“Heartbeat / 智能心跳”按钮打开后，可以直接在前端：
+
+- 查看已创建的心跳任务列表
+- 按最近触发优先级查看任务顺序
+- 查看任务是否启用
+- 查看最近状态、下一次执行时间、最近一次执行时间
+- 查看调度表达式与最近摘要
+- 直接“立即触发”一次任务
+- 删除心跳任务
+
+智能心跳任务独立于用户问答线程执行：
+
+- 不会出现在主会话的多 Agent 执行工作区域
+- 不会污染当前用户线程的 Action List / Round Trace / Execution Log
+- 更适合日报、巡检、定时提醒、周期性推送这类后台任务
+
+当前支持两类调度：
+
+- `oneshot`
+  - 一次性任务，例如“10 天后提醒我”
+- `recurring`
+  - 周期任务，例如“每天早上 9 点”或“每月 1 号”
+
+定时任务创建通过 supervisor-only 工具完成：
+
+- `get_current_datetime(...)`
+  - 用于处理相对时间表达，避免模型自行猜测当前时间
+- `create_heartbeat_task(...)`
+  - 用于创建 Heartbeat 任务
+  - 在 heartbeat 运行上下文内会被硬拦截，防止递归创建新的 heartbeat 任务
+
+### 5. 文件产物卡片
 
 如果 supervisor 在 `workspace/` 中生成了结果文件，并调用 `publish_workspace_file`，前端会在会话底部渲染文件卡片。
 
@@ -1104,7 +1152,7 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 - 但在最终答复里写出了 `workspace/...` 或 `/workspace/...` 路径
 - 系统会尝试自动把它补成文件卡片
 
-### 4. 运行态交互
+### 6. 运行态交互
 
 当前 Web Demo 还包含一组运行态交互约束：
 
@@ -1117,7 +1165,7 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
 - `Execution Log` 默认收起，避免长日志干扰主对话流
 - `Execution Log` 前端仅展示最近 60 条事件
 
-### 5. 用户上传文件（User Query）
+### 7. 用户上传文件（User Query）
 
 用户可在输入框左侧上传文件，并将文件与本轮 query 一起发送给 agent。
 

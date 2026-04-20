@@ -69,6 +69,10 @@ class BootstrapTaskProfile(BaseModel):
 
 
 class BootstrapContextRecord(BaseModel):
+    execution_mode: Literal["divide_and_conquer", "direct_supervisor"] = Field(
+        default="divide_and_conquer",
+        description="第二阶段应走分治派发，还是直接由 supervisor 调用管理工具完成。",
+    )
     selected_skill_ids: list[str] = Field(default_factory=list, description="bootstrap 阶段命中的 supervisor skill id 列表。")
     selected_skills_reasoning_by_id: dict[str, str] = Field(
         default_factory=dict,
@@ -110,6 +114,7 @@ def _build_subagent_spec(
 def _make_record_bootstrap_context_tool():
     @tool("record_bootstrap_context", args_schema=BootstrapContextRecord)
     def record_bootstrap_context(
+        execution_mode: str = "divide_and_conquer",
         selected_skill_ids: list[str] | None = None,
         selected_skills_reasoning_by_id: dict[str, str] | None = None,
         objective: str = "",
@@ -120,12 +125,16 @@ def _make_record_bootstrap_context_tool():
     ) -> str:
         """记录 bootstrap supervisor 选中的 skills、第一版任务理解和拆分依据。"""
         normalized_selected_skill_ids = normalize_supervisor_skill_ids(selected_skill_ids or [])
+        normalized_execution_mode = (
+            "direct_supervisor" if str(execution_mode).strip() == "direct_supervisor" else "divide_and_conquer"
+        )
         normalized_skill_reasons: dict[str, str] = {}
         for skill_id in normalized_selected_skill_ids:
             reason = str((selected_skills_reasoning_by_id or {}).get(skill_id, "")).strip()
             if reason:
                 normalized_skill_reasons[skill_id] = reason
         payload = BootstrapContextRecord(
+            execution_mode=normalized_execution_mode,
             selected_skill_ids=normalized_selected_skill_ids,
             selected_skills_reasoning_by_id=normalized_skill_reasons,
             objective=objective.strip(),
@@ -178,9 +187,10 @@ def build_agent(settings: Settings, query: str | None = None):
 def build_bootstrap_agent(
     settings: Settings,
     query: str | None = None,
+    run_mode: str = "interactive",
 ) -> tuple[Any, dict[str, Any]]:
     runtime_query = (query or settings.prompt).strip()
-    runtime_tools = load_runtime_tool_bundle()
+    runtime_tools = load_runtime_tool_bundle(run_mode=run_mode)
     backend = _make_backend(settings)
     model = _make_model(settings)
     agent_tools: list[Any] = [
@@ -213,11 +223,13 @@ def build_agent_bundle(
     settings: Settings,
     query: str | None = None,
     bootstrap_meta: dict[str, Any] | None = None,
+    run_mode: str = "interactive",
 ) -> tuple[Any, list[dict[str, str]], dict[str, Any]]:
     runtime_query = (query or settings.prompt).strip()
     model = _make_model(settings)
-    runtime_tools = load_runtime_tool_bundle()
+    runtime_tools = load_runtime_tool_bundle(run_mode=run_mode)
     (
+        execution_mode,
         selected_skill_ids,
         skill_selection_reasoning,
         skill_selection_error,
@@ -235,6 +247,7 @@ def build_agent_bundle(
     runtime_specs, roster_payload = _build_runtime_subagent_specs(
         model=model,
         query=runtime_query,
+        execution_mode=execution_mode,
         runtime_tools=runtime_tools,
         supervisor_skill_context=supervisor_skill_context,
         bootstrap_skill_reasoning_context=bootstrap_skill_reasoning_context,
@@ -251,14 +264,15 @@ def build_agent_bundle(
     )
     agent_tools: list[Any] = []
     agent_tools.append(runtime_tools["inspect_supervisor_skills_factory"]())
-    agent_tools.append(
-        runtime_tools["generate_subagents_factory"](
-            query=runtime_query,
-            reasoning=roster_payload["reasoning"],
-            planner_error=roster_payload["planner_error"],
-            workers=runtime_catalog,
+    if execution_mode != "direct_supervisor":
+        agent_tools.append(
+            runtime_tools["generate_subagents_factory"](
+                query=runtime_query,
+                reasoning=roster_payload["reasoning"],
+                planner_error=roster_payload["planner_error"],
+                workers=runtime_catalog,
+            )
         )
-    )
     agent_tools.append(runtime_tools["publish_workspace_file"])
     agent_tools.extend(runtime_tools.get("custom_supervisor_tools") or [])
 
@@ -283,6 +297,7 @@ def build_agent_bundle(
         debug=True,
     )
     return agent, runtime_catalog, {
+        "execution_mode": execution_mode,
         "selected_skill_ids": selected_skill_ids,
         "selected_skill_headers": [
             header for header in list_supervisor_skill_headers() if header["id"] in set(selected_skill_ids)
@@ -299,7 +314,12 @@ def build_agent_bundle(
 def _resolve_bootstrap_meta(
     *,
     bootstrap_meta: dict[str, Any],
-) -> tuple[list[str], str, str, dict[str, str], BootstrapTaskProfile, str, list[dict[str, str]]]:
+) -> tuple[str, list[str], str, str, dict[str, str], BootstrapTaskProfile, str, list[dict[str, str]]]:
+    execution_mode = (
+        "direct_supervisor"
+        if str(bootstrap_meta.get("execution_mode") or "").strip() == "direct_supervisor"
+        else "divide_and_conquer"
+    )
     selected_skill_ids = normalize_supervisor_skill_ids(bootstrap_meta.get("selected_skill_ids") or [])
     skill_selection_reasoning = str(bootstrap_meta.get("skill_selection_reasoning") or "").strip()
     skill_selection_error = str(bootstrap_meta.get("skill_selection_error") or "").strip()
@@ -321,6 +341,7 @@ def _resolve_bootstrap_meta(
         except Exception as exc:
             bootstrap_task_error = _format_planner_error(exc)
     return (
+        execution_mode,
         selected_skill_ids,
         skill_selection_reasoning,
         skill_selection_error,
@@ -335,6 +356,7 @@ def _build_runtime_subagent_specs(
     *,
     model: ChatOpenAI,
     query: str,
+    execution_mode: str,
     runtime_tools: dict[str, Any],
     supervisor_skill_context: str,
     bootstrap_skill_reasoning_context: str,
@@ -342,6 +364,13 @@ def _build_runtime_subagent_specs(
     bootstrap_action_list_context: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     base_specs = get_subagent_specs(runtime_tools)
+    if execution_mode == "direct_supervisor":
+        return base_specs, {
+            "delegation_needed": False,
+            "reasoning": "bootstrap 已明确当前任务属于 supervisor-only 管理动作，第二阶段直接调用对应工具完成。",
+            "planner_error": "",
+            "workers": [],
+        }
     runtime_plan = _plan_query_workers(
         model=model,
         query=query,

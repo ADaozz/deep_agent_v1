@@ -303,10 +303,13 @@ def list_active_supervisor_tool_ids() -> list[str]:
     return active
 
 
-def load_runtime_tool_bundle() -> dict[str, Any]:
+def load_runtime_tool_bundle(*, run_mode: str = "interactive") -> dict[str, Any]:
     active_tool_ids = set(list_active_tool_ids())
     active_worker_tool_ids = list_active_worker_tool_ids()
     active_supervisor_tool_ids = list_active_supervisor_tool_ids()
+    if run_mode == "heartbeat":
+        active_supervisor_tool_ids = [tool_id for tool_id in active_supervisor_tool_ids if tool_id != "create_heartbeat_task"]
+        active_tool_ids.discard("create_heartbeat_task")
     custom_descriptors = sniff_custom_tool_descriptors()
     fixed_modules = {
         "supervisor_skill_inspector": _load_module_from_path(

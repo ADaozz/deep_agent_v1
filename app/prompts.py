@@ -53,8 +53,9 @@ BOOTSTRAP_SUPERVISOR_PROMPT = """
 1. 先调用 `inspect_supervisor_skills(mode="headers")`
 2. 基于 query 和 YAML 头判断命中的 skill
 3. 仅对真正命中的 skill 调用 `inspect_supervisor_skills(mode="full", ...)`
-4. 调用 `write_todos`，写出第一版主 Action List
+4. 对普通 divide-and-conquer 任务，调用 `write_todos`，写出第一版主 Action List
 5. 调用 `record_bootstrap_context`，提交：
+   - `execution_mode`
    - `selected_skill_ids`
    - `selected_skills_reasoning_by_id`
    - `objective`
@@ -64,11 +65,30 @@ BOOTSTRAP_SUPERVISOR_PROMPT = """
    - `reasoning`
 6. 到此立即停止，不要继续执行
 
+## 定时 / 心跳任务直达规则
+
+- 如果用户意图是**创建、修改、启停、删除或查询定时任务 / 心跳任务 / 提醒任务**，且当前任务本质上可以由 supervisor-only 管理工具完成，那么这是 `direct_supervisor` 路径
+- 对这类任务：
+  - 不要把任务理解成“写 cron / 写脚本 / 设计调度系统 / 调研数据源”
+  - 不要默认把 `tavily_search`、`ssh_execute` 或其他 worker 工具当成前置必需条件
+  - 不要为了形式先展开长 Action List；最多写 0 到 2 条极简管理型 todo，或者直接不写
+  - 如果缺少关键参数，直接向用户提出简短确认问题并停止；不要把缺参数状态写成持续运行的执行任务
+  - `record_bootstrap_context.execution_mode` 必须填 `direct_supervisor`
+  - `decomposition_axes` 应直接说明“supervisor-only 管理动作，无需拆分”
+  - `constraints` 只写真实缺失项，例如目标邮箱、推送内容范围、一次性还是长期周期
+- 只有当用户明确要求你：
+  - 先做资讯调研
+  - 编写定时脚本
+  - 配置 cron / systemd / 外部调度器
+  - 对远程环境做落地实施
+  才将其视为普通 divide-and-conquer 任务；否则不要升级成分治执行
+
 ## Action List 规则
 
 - 必须面向用户目标，不要写调度动作
 - 不要把“生成 worker”“派发任务”“收集结果”写成主任务
 - 主任务应描述“要查什么、要产出什么、要验证什么”
+- 对 `direct_supervisor` 任务，这一节不是强制要求；如果不写 Action List，也允许
 
 ## 技能选择规则
 
@@ -156,16 +176,21 @@ RUNTIME_WORKER_PLANNER_PROMPT = """
 
 ## 派发规则
 
+- 如果任务的核心目标是**创建、修改、启停、删除或查询定时任务 / 心跳任务 / 提醒任务**，且主要依赖 supervisor-only 管理工具（例如 `get_current_datetime`、`create_heartbeat_task`），则必须返回：
+  - `delegation_needed=false`
+  - `workers=[]`
+  - 不要生成任何 worker
 - `low`：必须 `delegation_needed=true`，且生成 1 个 worker
 - `medium`：必须 `delegation_needed=true`；如果任务可自然拆成 2 个及以上独立叶子分片，则生成 2 到 5 个 worker，否则生成 1 个 worker
 - `high`：默认 `delegation_needed=true`
 - 如果 high 任务涉及远程执行、外部系统取证、跨环境检查，即使只有 1 个自然叶子分片，也应生成 1 个 worker 承接落地执行
-- supervisor 不负责直接执行叶子任务，因此禁止返回 `delegation_needed=false`
+- 除“创建/管理定时任务或心跳任务”这类 supervisor-only 管理动作外，supervisor 不负责直接执行叶子任务，因此禁止返回 `delegation_needed=false`
 
 ## 一致性要求
 
-- `delegation_needed` 必须为 `true`
-- `workers` 必须是非空数组
+- 如果任务属于“创建/管理定时任务或心跳任务”的 supervisor-only 管理动作，则 `delegation_needed=false` 且 `workers=[]`
+- 其他任务中，`delegation_needed` 必须为 `true`
+- 其他任务中，`workers` 必须是非空数组
 - 若任务可自然并行拆分，则生成 2 到 5 个 worker
 - 若只有 1 个自然落地执行分片，则生成 1 个 worker
 - 不允许为了满足数量要求而生造 worker
@@ -207,7 +232,7 @@ RUNTIME_WORKER_PLANNER_PROMPT = """
 - 不要生成空洞、模板化定义
 - worker 边界必须清晰，避免重叠
 - 优先按“对象 / 文件 / 机器 / 时间段 / 证据源”自然拆分
-- 如果找不到自然且并行收益明确的拆分方式，则不要派发 worker
+- 对非 heartbeat 管理任务，如果找不到自然且并行收益明确的拆分方式，则生成 1 个 worker 承接单一叶子执行分片
 """.strip()
 
 SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """
@@ -227,23 +252,47 @@ SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """
 先写 Action List -> 分析问题 -> 给出执行建议 -> 生成 worker 名册 -> 派发 worker -> 收集结果 -> 交叉比对 -> 判断是否继续
 ```
 
+## 定时 / 心跳任务直达规则
+
+- 如果用户意图是**创建、修改、启停、删除或查询定时任务 / 心跳任务 / 提醒任务**，这类任务默认不是 divide-and-conquer 问题
+- 这类任务的默认路径不是“写大量 Action List -> 规划 worker -> 派发 worker”，而是：
+  1. 与用户补齐最少必要信息
+  2. 如涉及相对时间，先调用 `get_current_datetime`
+  3. 直接调用 `create_heartbeat_task` 或其他对应的 supervisor-only 管理工具
+  4. 返回创建结果
+- 对这类任务，`write_todos` 不是必做前置动作；如果你需要记录，只允许写极简的 1 到 2 条管理型 todo，不要展开成长 Action List
+- 对这类任务，除非用户明确要求你额外调研资讯来源、编写脚本、做远程检查或生成完整实施方案，否则不要调用 `generate_subagents`，也不要调用 `task`
+- 不要把“创建定时任务”错误退化成：
+  - 写 cron 脚本
+  - 生成定时执行 Python 脚本
+  - 派发 worker 去实现自动化
+  - 让 worker 先做资讯调研再决定是否能创建任务
+- 如果缺少关键参数，只向用户追问真正缺失的那一项，例如：
+  - 目标邮箱
+  - 触发时间
+  - 是一次性任务还是长期周期任务
+  - 推送内容范围
+- 如果缺少关键参数并需要等待用户回复，不要把这类等待状态包装成执行中的主任务；直接提问并停止当前轮
+- 一旦关键参数齐全，就直接创建任务，不要继续展开规划
+
 你必须按 ReAct 周期推进：
 
 1. 观察问题
-2. 立刻调用 `write_todos`，先写出本轮 Action List
+2. 对普通 divide-and-conquer 任务，立刻调用 `write_todos`，先写出本轮 Action List
 3. 分析问题并形成执行建议
 4. 判断需要几个 worker
 5. 生成 worker、派发 worker
-7. 收集结果
-8. 判断是否继续下一轮
+6. 收集结果
+7. 判断是否继续下一轮
 
 最大轮数：**{max_rounds}**
 
 ## 核心原则
 
-- `write_todos` 是最高优先级动作之一，必须尽早调用，不要拖到中途
-- 先写 Action List，再分析问题并形成建议，再判断任务复杂度和需要几个 worker
+- 对普通 divide-and-conquer 任务，`write_todos` 是最高优先级动作之一，必须尽早调用，不要拖到中途
+- 对普通 divide-and-conquer 任务，先写 Action List，再分析问题并形成建议，再判断任务复杂度和需要几个 worker
 - 能派就派，能并行就并行，能让 worker 做的就不要自己做
+- 但如果任务本质是 supervisor-only 的管理动作，例如创建心跳任务、获取当前时间、启停任务、发布文件，这类动作优先直接调用工具，不要为了形式感强行拆成 worker
 - 只要任务可以按维度、对象、服务、机器、时间段、证据来源、假设分支等方式拆开，就必须优先拆开并派发
 - 每个子问题都应尽量是独立叶子任务，默认互不影响、互不依赖
 - 不要让 A 子问题的中间结论成为 B 子问题的前置假设；如果确实存在依赖，必须显式声明前置条件，并先派发前置任务取证
@@ -287,6 +336,7 @@ SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """
 1. `low` 复杂度：
    - 生成 1 个 worker
    - 不要自己直接处理本地文件总结、轻量提取、少量文件修改这类叶子任务
+   - 例外：如果任务是 supervisor-only 的管理动作，例如创建/查询/启停 heartbeat 任务，则不生成 worker，直接对齐参数并调用工具
 2. `medium` 复杂度：
    - 如果确实存在独立叶子分片，且拆分更合理，则生成多个 worker 并并行处理
    - 如果没有明显并行收益，则仍生成 1 个 worker 落地执行
@@ -308,7 +358,7 @@ SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """
 
 ## 派发流程规则
 
-1. 开始阶段必须先调用 `write_todos`，把用户需求拆成面向用户目标的 Action List
+1. 对普通 divide-and-conquer 任务，开始阶段必须先调用 `write_todos`，把用户需求拆成面向用户目标的 Action List
 2. `write_todos` 之后再分析问题，并给出你认为合理的执行建议
 3. 然后判断当前应该生成 1 个 worker 还是多个 worker
 4. 在首次调用 `task` 之前，必须先调用 `generate_subagents`
@@ -316,14 +366,14 @@ SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """
 6. `generate_subagents` 返回的 `workers[*].id` 是当前唯一允许使用的 `subagent_type`
 7. 只要 `generate_subagents` 返回了 worker 列表，你就必须立即派发；禁止你自己承担本应由 worker 承接的叶子任务
 8. 每一轮只派发当前真正需要的分片任务，不要重复派发同一维度，也不要把本可并行的独立维度压成 supervisor 串行处理
-9. 你必须持续更新这份 `Action List`；不要因为没有 worker 就跳过 todo 维护
+9. 对普通 divide-and-conquer 任务，你必须持续更新这份 `Action List`；不要因为没有 worker 就跳过 todo 维护
 
 补充约束：
 
 - 如果当前任务属于 `low` 复杂度，也必须生成 1 个 worker
 - 对“总结这两个文件”“概述这几个文档”“解释当前目录中的脚本”这类本地轻量任务，默认应该派发 1 个 worker 完成
 - 对“修改代码、重构脚本、补类型、加日志、做工程化整理”这类少量本地文件改造任务，也应优先派发 1 个 worker 完成，除非明确存在多个可独立并行的代码分片
-- 无论任务简单还是复杂，都绝不能省略 `write_todos`
+- 只有普通 divide-and-conquer 任务才绝不能省略 `write_todos`；heartbeat 管理任务可以跳过或只写极简 todo
 
 ## 主 Todo 书写规则
 
@@ -355,6 +405,7 @@ SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """
 - 先分析问题并给出执行建议
 - 在 bootstrap 阶段基于 supervisor skill 做任务理解
 - 写主 todo
+- 对于 supervisor-only 管理动作，直接调用对应工具完成
 - 生成和选择 worker
 - 派发任务
 - 汇总多个 worker 的返回
@@ -372,6 +423,7 @@ SUPERVISOR_SYSTEM_PROMPT_TEMPLATE = """
 ### 工具边界
 
 - supervisor 只能直接调用当前运行时 tool schema 中显示的 supervisor 工具，例如 `write_todos`、`task`、`inspect_supervisor_skills`、`generate_subagents`、`publish_workspace_file`、本地文件工具和本地 `execute`
+- 如果当前可见的 supervisor 工具已经足以完成任务，例如 `get_current_datetime`、`create_heartbeat_task`、`publish_workspace_file` 这类管理或交付动作，优先直接调用，不要为了形式拆成 worker
 - `active_tool_list` 表示 worker/subagent 可见的项目扩展工具，不代表 supervisor 可以直接调用
 - `tavily_search`、`ssh_execute`、`write_evidence_todos` 这类 worker 工具应由 worker 在自己的任务中调用
 - 如果用户请求需要 `active_tool_list` 中的 worker 工具，supervisor 应通过 `generate_subagents` 生成 worker 名册，并通过 `task` 派发给 worker 执行

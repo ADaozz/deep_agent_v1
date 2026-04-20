@@ -1,5 +1,5 @@
 import { icons } from "../icons.js";
-import { formatUtc8Timestamp } from "../utils.js";
+import { formatRelativeHeartbeatTime, formatUtc8Timestamp } from "../utils.js";
 
 export const PromptCenter = {
   props: {
@@ -339,7 +339,7 @@ export const ToolCenter = {
             </div>
             <span class="tag">{{ activeTool.switchable ? (activeTool.enabled ? 'enabled' : 'disabled') : 'pinned' }}</span>
           </div>
-          <div class="detail-grid">
+          <div class="detail-grid heartbeat-detail-grid">
             <div class="info-card">
               <div class="info-label">作用域</div>
               <div class="info-value">{{ activeTool.scope }}</div>
@@ -374,5 +374,203 @@ export const ToolCenter = {
   `,
   setup() {
     return { icons };
+  },
+};
+
+export const HeartbeatCenter = {
+  props: {
+    tasks: { type: Array, default: () => [] },
+    runs: { type: Array, default: () => [] },
+    activeTaskId: String,
+    loading: Boolean,
+    error: String,
+    togglingTaskId: String,
+    deletingTaskId: String,
+    runningTaskId: String,
+  },
+  emits: ["select-task", "toggle-task", "run-task", "delete-task"],
+  methods: {
+    resolveHeartbeatStatus(task) {
+      const raw = String(task?.last_status || task?.status || "").trim().toLowerCase();
+      if (raw === "running") {
+        return {
+          label: "运行中",
+          tone: "is-running",
+          icon: icons.LoaderCircle,
+          spinning: true,
+        };
+      }
+      if (["done", "completed", "complete", "success", "succeeded"].includes(raw)) {
+        return {
+          label: "完成",
+          tone: "is-success",
+          icon: icons.CheckCircle2,
+          spinning: false,
+        };
+      }
+      if (["blocked", "degraded", "warning"].includes(raw)) {
+        return {
+          label: "受阻",
+          tone: "is-blocked",
+          icon: icons.ShieldAlert,
+          spinning: false,
+        };
+      }
+      if (["error", "failed", "failure"].includes(raw)) {
+        return {
+          label: "失败",
+          tone: "is-error",
+          icon: icons.XCircle,
+          spinning: false,
+        };
+      }
+      return {
+        label: task?.last_status || task?.status || "-",
+        tone: "",
+        icon: icons.Circle,
+        spinning: false,
+      };
+    },
+  },
+  computed: {
+    sortedTasks() {
+      return [...this.tasks].sort((left, right) => {
+        const rank = (item) => {
+          if (String(item?.status || "").toLowerCase() === "running") return 0;
+          const nextRun = item?.next_run_at ? new Date(item.next_run_at).getTime() : Number.POSITIVE_INFINITY;
+          const now = Date.now();
+          if (Number.isFinite(nextRun) && nextRun > now && nextRun - now <= 12 * 60 * 60 * 1000) return 1;
+          if (Number.isFinite(nextRun) && nextRun > now) return 2;
+          return 3;
+        };
+        const leftRank = rank(left);
+        const rightRank = rank(right);
+        if (leftRank !== rightRank) return leftRank - rightRank;
+        const leftNext = left?.next_run_at ? new Date(left.next_run_at).getTime() : Number.POSITIVE_INFINITY;
+        const rightNext = right?.next_run_at ? new Date(right.next_run_at).getTime() : Number.POSITIVE_INFINITY;
+        if (leftRank < 3 && leftNext !== rightNext) return leftNext - rightNext;
+        const leftLast = left?.last_run_at ? new Date(left.last_run_at).getTime() : 0;
+        const rightLast = right?.last_run_at ? new Date(right.last_run_at).getTime() : 0;
+        return rightLast - leftLast;
+      });
+    },
+    activeTask() {
+      return this.tasks.find((item) => item.task_id === this.activeTaskId) || this.sortedTasks[0] || null;
+    },
+    activeStatusMeta() {
+      return this.resolveHeartbeatStatus(this.activeTask);
+    },
+  },
+  template: `
+    <div class="prompt-browser">
+      <div class="prompt-nav">
+        <div v-if="loading" class="empty-block">
+          <span class="loading-inline">
+            <component :is="icons.LoaderCircle" class="h-4 w-4 animate-spin" />
+            <span>正在加载智能心跳...</span>
+          </span>
+        </div>
+        <div v-else-if="error" class="alert-block">{{ error }}</div>
+        <div v-else-if="!sortedTasks.length" class="empty-block">当前还没有已创建的智能心跳任务。</div>
+        <div v-else class="history-thread-list">
+          <div
+            v-for="task in sortedTasks"
+            :key="task.task_id"
+            :class="['tool-nav-card', 'heartbeat-task-card', task.task_id === (activeTask?.task_id || '') ? 'is-active' : '']"
+          >
+            <button type="button" class="tool-nav-main" @click="$emit('select-task', task.task_id)">
+              <div class="tool-nav-head">
+                <div>
+                  <div class="prompt-nav-title">{{ task.title }}</div>
+                  <div class="prompt-nav-subtitle">{{ formatRelativeHeartbeatTime(task) }}</div>
+                </div>
+                <span class="tag">{{ task.schedule_kind }}</span>
+              </div>
+              <div class="prompt-nav-subtitle heartbeat-nav-meta">{{ task.next_run_at ? formatUtc8Timestamp(task.next_run_at) : (task.last_run_at ? formatUtc8Timestamp(task.last_run_at) : '-') }}</div>
+            </button>
+            <div class="tool-nav-actions heartbeat-card-actions">
+              <button
+                type="button"
+                :class="['tool-switch', task.enabled ? 'is-on' : 'is-off']"
+                :disabled="togglingTaskId === task.task_id"
+                @click="$emit('toggle-task', task.task_id, !task.enabled)"
+              >
+                <span class="tool-switch-track"><span class="tool-switch-thumb"></span></span>
+                <span>{{ togglingTaskId === task.task_id ? '切换中' : task.enabled ? '已启用' : '已暂停' }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="prompt-content heartbeat-content">
+        <div v-if="activeTask" class="stack-block prompt-stack heartbeat-prompt-stack">
+          <div class="prompt-meta-card">
+            <div>
+              <div class="summary-title">{{ activeTask.title }}</div>
+              <div class="summary-subtitle">{{ activeTask.query_text }}</div>
+            </div>
+            <div class="prompt-meta-tags">
+              <span class="tag prompt-kind-tag is-dynamic">Heartbeat</span>
+              <span class="tag">{{ activeTask.schedule_kind }}</span>
+            </div>
+          </div>
+          <div class="detail-grid heartbeat-detail-grid">
+            <div class="info-card">
+              <div class="info-label">下一次执行</div>
+              <div class="info-value">{{ activeTask.next_run_at ? formatUtc8Timestamp(activeTask.next_run_at) : '-' }}</div>
+            </div>
+            <div class="info-card">
+              <div class="info-label">最近一次执行</div>
+              <div class="info-value">{{ activeTask.last_run_at ? formatUtc8Timestamp(activeTask.last_run_at) : '-' }}</div>
+            </div>
+            <div class="info-card">
+              <div class="info-label">最近状态</div>
+              <div :class="['info-value', 'heartbeat-status-value', activeStatusMeta.tone]">
+                <span :class="['status-icon', activeStatusMeta.tone]">
+                  <component :is="activeStatusMeta.icon" class="h-4 w-4" :class="{ 'animate-spin': activeStatusMeta.spinning }" />
+                </span>
+                <span>{{ activeStatusMeta.label }}</span>
+              </div>
+            </div>
+            <div class="info-card">
+              <div class="info-label">调度信息</div>
+              <div class="info-value preserve-lines">kind={{ activeTask.schedule_kind }}\ntype={{ activeTask.schedule_type || '-' }}\nexpr={{ activeTask.schedule_expr || activeTask.run_at || '-' }}</div>
+            </div>
+            <div class="info-card wide">
+              <div class="info-label">最近摘要</div>
+              <div class="info-value preserve-lines heartbeat-summary-value">{{ activeTask.last_summary || '暂无执行摘要。' }}</div>
+            </div>
+          </div>
+          <div class="prompt-toolbar">
+            <div class="tool-nav-actions heartbeat-detail-actions">
+              <button
+                type="button"
+                class="primary-button heartbeat-detail-run-button"
+                :disabled="runningTaskId === activeTask.task_id || String(activeTask.status || '').toLowerCase() === 'running'"
+                @click="$emit('run-task', activeTask.task_id)"
+              >
+                <component :is="runningTaskId === activeTask.task_id ? icons.LoaderCircle : icons.Activity" class="h-4 w-4" :class="{ 'animate-spin': runningTaskId === activeTask.task_id }" />
+                <span>{{ runningTaskId === activeTask.task_id ? '触发中' : '立即触发' }}</span>
+              </button>
+              <button
+                type="button"
+                class="icon-button history-thread-delete"
+                :disabled="deletingTaskId === activeTask.task_id"
+                @click="$emit('delete-task', activeTask.task_id)"
+              >
+                <component :is="deletingTaskId === activeTask.task_id ? icons.LoaderCircle : icons.Trash2" class="h-4 w-4" :class="{ 'animate-spin': deletingTaskId === activeTask.task_id }" />
+              </button>
+            </div>
+          </div>
+          <div class="prompt-toolbar">
+            <span class="prompt-toolbar-note">智能心跳任务独立于用户问答线程执行，不会出现在多 Agent 执行工作区域中。</span>
+          </div>
+        </div>
+        <div v-else class="empty-block">请选择左侧的智能心跳任务。</div>
+      </div>
+    </div>
+  `,
+  setup() {
+    return { icons, formatUtc8Timestamp, formatRelativeHeartbeatTime };
   },
 };

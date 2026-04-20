@@ -11,6 +11,7 @@ from typing import Any
 
 from app.agent import build_agent_bundle, build_bootstrap_agent
 from app.config import Settings
+from app.runtime_context import runtime_mode
 from app.logging_utils import short_text
 from app.skill_store import list_supervisor_skill_headers, normalize_supervisor_skill_ids
 from app.workspace_files import build_workspace_file_card
@@ -195,6 +196,11 @@ class DemoRunCollector:
         final: bool = True,
         error: str = "",
     ) -> dict[str, Any]:
+        execution_mode = (
+            "direct_supervisor"
+            if str((self.bootstrap_context or {}).get("execution_mode") or "").strip() == "direct_supervisor"
+            else "divide_and_conquer"
+        )
         final_summary = "".join(self.main_text).strip()
         self._capture_workspace_files_from_summary(final_summary)
         if final and final_summary:
@@ -212,9 +218,12 @@ class DemoRunCollector:
                     stop_reason += f" 等 {len(task_errors)} 项。"
             elif task_pending_issues:
                 status = "stopped"
-                stop_reason = "当前主任务尚未完成收口，仍在进一步收集信息：" + "；".join(
-                    task_pending_issues[:2]
-                )
+                if execution_mode == "direct_supervisor":
+                    stop_reason = "当前任务等待用户确认必要信息：" + "；".join(task_pending_issues[:2])
+                else:
+                    stop_reason = "当前主任务尚未完成收口，仍在进一步收集信息：" + "；".join(
+                        task_pending_issues[:2]
+                    )
                 if len(task_pending_issues) > 2:
                     stop_reason += f" 等 {len(task_pending_issues)} 项。"
             else:
@@ -245,7 +254,10 @@ class DemoRunCollector:
                 self.logged_integrity_issues.add(issue)
         for issue in task_pending_issues:
             if issue not in self.logged_integrity_issues:
-                self._push_log("scheduler", f"主任务仍在进一步收集信息: {issue}")
+                if execution_mode == "direct_supervisor":
+                    self._push_log("scheduler", f"当前任务等待用户确认必要信息: {issue}")
+                else:
+                    self._push_log("scheduler", f"主任务仍在进一步收集信息: {issue}")
                 self.logged_integrity_issues.add(issue)
 
         if final and status == "done" and self.main_todos and not self.rounds and not self.direct_completion_logged:
@@ -255,6 +267,7 @@ class DemoRunCollector:
         return {
             "query": query,
             "max_rounds": max_rounds,
+            "execution_mode": execution_mode,
             "status": status,
             "current_round": len(self.rounds),
             "scheduler_thought": scheduler_thought,
@@ -528,6 +541,7 @@ class DemoRunCollector:
                     self._write_event(
                         "bootstrap_context_recorded",
                         source="scheduler",
+                        execution_mode=str(context.get("execution_mode") or "").strip() or "divide_and_conquer",
                         selected_skill_ids=selected_skill_ids,
                         objective=str(context.get("objective") or "").strip(),
                     )
@@ -1052,6 +1066,7 @@ def run_demo_session_stream(
     messages: list[dict[str, str]] | None = None,
     user_files: list[dict[str, Any]] | None = None,
     agent_query: str | None = None,
+    run_mode: str = "interactive",
 ):
     os.makedirs(os.path.dirname(settings.log_file) or ".", exist_ok=True)
     collector = DemoRunCollector(log_file=settings.log_file, runtime_catalog=[])
@@ -1087,26 +1102,28 @@ def run_demo_session_stream(
         if bootstrap_event:
             yield bootstrap_event
 
-        bootstrap_agent, _ = build_bootstrap_agent(settings=settings, query=effective_query)
+        bootstrap_agent, _ = build_bootstrap_agent(settings=settings, query=effective_query, run_mode=run_mode)
         collector.bootstrap_mode = True
         collector.capture_main_text = False
         try:
-            for chunk in bootstrap_agent.stream(
-                {"messages": message_payload},
-                stream_mode=["updates", "messages", "custom"],
-                subgraphs=True,
-                version="v2",
-            ):
-                collector.handle(chunk)
-                snapshot = collector.build_payload(query=query, max_rounds=max_rounds, final=False)
-                event = emit(snapshot, "snapshot")
-                if event:
-                    yield event
+            with runtime_mode(run_mode):
+                for chunk in bootstrap_agent.stream(
+                    {"messages": message_payload},
+                    stream_mode=["updates", "messages", "custom"],
+                    subgraphs=True,
+                    version="v2",
+                ):
+                    collector.handle(chunk)
+                    snapshot = collector.build_payload(query=query, max_rounds=max_rounds, final=False)
+                    event = emit(snapshot, "snapshot")
+                    if event:
+                        yield event
         finally:
             collector.bootstrap_mode = False
             collector.capture_main_text = True
 
         bootstrap_meta = {
+            "execution_mode": str((collector.bootstrap_context or {}).get("execution_mode") or "").strip(),
             "selected_skill_ids": (collector.bootstrap_context or {}).get("selected_skill_ids") or [],
             "selected_skill_headers": list(collector.loaded_skills or []),
             "selected_skills_reasoning_by_id": (collector.bootstrap_context or {}).get("selected_skills_reasoning_by_id")
@@ -1134,6 +1151,7 @@ def run_demo_session_stream(
             settings=settings,
             query=effective_query,
             bootstrap_meta=bootstrap_meta,
+            run_mode=run_mode,
         )
         collector.runtime_catalog = list(runtime_catalog)
         collector.runtime_catalog_by_id = {item["id"]: item for item in runtime_catalog}
@@ -1151,6 +1169,8 @@ def run_demo_session_stream(
             )
         else:
             collector._push_log("scheduler", "bootstrap 阶段未命中额外 supervisor skill。")
+        if bootstrap_meta.get("execution_mode") == "direct_supervisor":
+            collector._push_log("scheduler", "bootstrap 已判定当前任务属于 supervisor-only 管理动作，第二阶段将跳过 worker 规划。")
         if bootstrap_meta.get("bootstrap_task_error"):
             collector._push_log(
                 "scheduler",
@@ -1168,19 +1188,20 @@ def run_demo_session_stream(
         if prepared_event:
             yield prepared_event
 
-        for chunk in agent.stream(
-            {"messages": message_payload},
-            stream_mode=["updates", "messages", "custom"],
-            subgraphs=True,
-            version="v2",
-        ):
-            collector.handle(chunk)
-            snapshot = collector.build_payload(query=query, max_rounds=max_rounds, final=False)
-            event = emit(snapshot, "snapshot")
-            if event:
-                yield event
-            if len(collector.rounds) >= max_rounds:
-                break
+        with runtime_mode(run_mode):
+            for chunk in agent.stream(
+                {"messages": message_payload},
+                stream_mode=["updates", "messages", "custom"],
+                subgraphs=True,
+                version="v2",
+            ):
+                collector.handle(chunk)
+                snapshot = collector.build_payload(query=query, max_rounds=max_rounds, final=False)
+                event = emit(snapshot, "snapshot")
+                if event:
+                    yield event
+                if len(collector.rounds) >= max_rounds:
+                    break
     except Exception as exc:  # noqa: BLE001
         fallback_summary = _build_fallback_summary_from_worker_reports(collector, exc)
         if fallback_summary:
@@ -1232,6 +1253,7 @@ def _run_bootstrap_phase(
 
     context = dict(collector.bootstrap_context or {})
     return {
+        "execution_mode": str(context.get("execution_mode") or "").strip(),
         "selected_skill_ids": context.get("selected_skill_ids") or [],
         "selected_skill_headers": list(collector.loaded_skills or []),
         "selected_skills_reasoning_by_id": context.get("selected_skills_reasoning_by_id") or {},
@@ -1422,6 +1444,11 @@ def _parse_bootstrap_context_from_tool_output(content: Any) -> dict[str, Any] | 
     if not isinstance(payload, dict):
         return None
     return {
+        "execution_mode": (
+            "direct_supervisor"
+            if str(payload.get("execution_mode") or "").strip() == "direct_supervisor"
+            else "divide_and_conquer"
+        ),
         "selected_skill_ids": normalize_supervisor_skill_ids(payload.get("selected_skill_ids") or []),
         "selected_skills_reasoning_by_id": {
             str(skill_id).strip(): str(reason).strip()

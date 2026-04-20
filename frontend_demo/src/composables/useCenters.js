@@ -49,6 +49,15 @@ export function useCenters({
   const toolSaveFeedback = ref("");
   const toolSaveFeedbackTone = ref("");
 
+  const heartbeatTasks = ref([]);
+  const heartbeatRuns = ref([]);
+  const heartbeatLoading = ref(false);
+  const heartbeatError = ref("");
+  const heartbeatTogglingId = ref("");
+  const deletingHeartbeatTaskId = ref("");
+  const runningHeartbeatTaskId = ref("");
+  let heartbeatRefreshTimer = 0;
+
   const historyThreads = ref([]);
   const historyThreadsLoading = ref(false);
   const historyThreadsError = ref("");
@@ -206,6 +215,52 @@ export function useCenters({
     }
   }
 
+  async function loadHeartbeats(taskId = "") {
+    heartbeatLoading.value = true;
+    heartbeatError.value = "";
+    try {
+      const payload = await demoApi.fetchHeartbeats(taskId);
+      heartbeatTasks.value = Array.isArray(payload.tasks) ? payload.tasks : [];
+      heartbeatRuns.value = Array.isArray(payload.runs) ? payload.runs : [];
+      const nextId = taskId || uiState.value.activeHeartbeatTaskId || heartbeatTasks.value[0]?.task_id || "";
+      const activeTask = heartbeatTasks.value.find((item) => item.task_id === nextId);
+      if (!activeTask || String(activeTask.status || "").toLowerCase() !== "running") {
+        runningHeartbeatTaskId.value = "";
+      }
+      uiState.value = normalizeUiState({
+        ...uiState.value,
+        activeHeartbeatTaskId: nextId,
+      });
+    } catch (loadError) {
+      heartbeatError.value = `加载智能心跳失败: ${loadError.message}`;
+    } finally {
+      heartbeatLoading.value = false;
+    }
+  }
+
+  function clearHeartbeatRefreshTimer() {
+    if (heartbeatRefreshTimer) {
+      globalThis.clearTimeout(heartbeatRefreshTimer);
+      heartbeatRefreshTimer = 0;
+    }
+  }
+
+  function scheduleHeartbeatRefresh(taskId, remaining = 120) {
+    clearHeartbeatRefreshTimer();
+    if (!taskId || remaining <= 0) return;
+    heartbeatRefreshTimer = globalThis.setTimeout(async () => {
+      heartbeatRefreshTimer = 0;
+      await loadHeartbeats(taskId);
+      const activeTask = heartbeatTasks.value.find((item) => item.task_id === taskId);
+      if (activeTask && String(activeTask.status || "").toLowerCase() === "running") {
+        runningHeartbeatTaskId.value = taskId;
+        scheduleHeartbeatRefresh(taskId, remaining - 1);
+      } else if (runningHeartbeatTaskId.value === taskId) {
+        runningHeartbeatTaskId.value = "";
+      }
+    }, 3000);
+  }
+
   function openPromptCenter() {
     uiState.value = normalizeUiState({ ...uiState.value, showPromptModal: true });
     if (!promptSections.value.length && !promptLoading.value) void loadPrompts();
@@ -220,6 +275,13 @@ export function useCenters({
   function openToolCenter() {
     uiState.value = normalizeUiState({ ...uiState.value, showToolModal: true });
     if (!toolSections.value.length && !toolLoading.value) void loadTools();
+  }
+
+  function openHeartbeatCenter() {
+    uiState.value = normalizeUiState({ ...uiState.value, showHeartbeatModal: true });
+    if (!heartbeatLoading.value) {
+      void loadHeartbeats(uiState.value.activeHeartbeatTaskId || "");
+    }
   }
 
   function openHistoryCenter() {
@@ -313,6 +375,39 @@ export function useCenters({
     }
   }
 
+  async function handleToggleHeartbeat(taskId, enabled) {
+    if (!taskId || heartbeatTogglingId.value) return;
+    heartbeatTogglingId.value = taskId;
+    heartbeatError.value = "";
+    try {
+      const payload = await demoApi.toggleHeartbeat(taskId, enabled);
+      heartbeatTasks.value = Array.isArray(payload.tasks) ? payload.tasks : heartbeatTasks.value;
+    } catch (toggleError) {
+      heartbeatError.value = `切换智能心跳失败: ${toggleError.message}`;
+    } finally {
+      heartbeatTogglingId.value = "";
+    }
+  }
+
+  async function handleRunHeartbeatNow(taskId) {
+    if (!taskId || runningHeartbeatTaskId.value) return;
+    runningHeartbeatTaskId.value = taskId;
+    heartbeatError.value = "";
+    try {
+      const payload = await demoApi.runHeartbeatNow(taskId);
+      heartbeatTasks.value = Array.isArray(payload.tasks) ? payload.tasks : heartbeatTasks.value;
+      heartbeatRuns.value = Array.isArray(payload.runs) ? payload.runs : heartbeatRuns.value;
+      uiState.value = normalizeUiState({
+        ...uiState.value,
+        activeHeartbeatTaskId: taskId,
+      });
+      scheduleHeartbeatRefresh(taskId);
+    } catch (runError) {
+      heartbeatError.value = `执行智能心跳测试失败: ${runError.message}`;
+      runningHeartbeatTaskId.value = "";
+    }
+  }
+
   async function handleSelectThread(nextThreadId) {
     if (!nextThreadId || nextThreadId === threadId.value) {
       uiState.value = normalizeUiState({ ...uiState.value, showHistoryModal: false });
@@ -374,6 +469,27 @@ export function useCenters({
     }
   }
 
+  async function handleDeleteHeartbeat(taskId) {
+    if (!taskId || deletingHeartbeatTaskId.value) return;
+    deletingHeartbeatTaskId.value = taskId;
+    heartbeatError.value = "";
+    try {
+      await demoApi.deleteHeartbeat(taskId);
+      heartbeatTasks.value = heartbeatTasks.value.filter((item) => item.task_id !== taskId);
+      heartbeatRuns.value = [];
+      if (uiState.value.activeHeartbeatTaskId === taskId) {
+        uiState.value = normalizeUiState({
+          ...uiState.value,
+          activeHeartbeatTaskId: heartbeatTasks.value[0]?.task_id || "",
+        });
+      }
+    } catch (deleteError) {
+      heartbeatError.value = `删除智能心跳失败: ${deleteError.message}`;
+    } finally {
+      deletingHeartbeatTaskId.value = "";
+    }
+  }
+
   function selectPrompt(promptId) {
     uiState.value = normalizeUiState({
       ...uiState.value,
@@ -404,6 +520,11 @@ export function useCenters({
     uiState.value = normalizeUiState({ ...uiState.value, activeToolId: toolId });
   }
 
+  function selectHeartbeatTask(taskId) {
+    uiState.value = normalizeUiState({ ...uiState.value, activeHeartbeatTaskId: taskId });
+    void loadHeartbeats(taskId);
+  }
+
   function closePromptModal() {
     uiState.value = normalizeUiState({ ...uiState.value, showPromptModal: false });
   }
@@ -415,6 +536,11 @@ export function useCenters({
 
   function closeToolModal() {
     uiState.value = normalizeUiState({ ...uiState.value, showToolModal: false });
+  }
+
+  function closeHeartbeatModal() {
+    clearHeartbeatRefreshTimer();
+    uiState.value = normalizeUiState({ ...uiState.value, showHeartbeatModal: false });
   }
 
   function closeHistoryModal() {
@@ -430,14 +556,23 @@ export function useCenters({
     loadHistory,
     loadHistoryThreads,
     loadMeta,
+    loadHeartbeats,
     loadPrompts,
     loadSkills,
     loadTools,
     modelName,
     openHistoryCenter,
+    openHeartbeatCenter,
     openPromptCenter,
     openSkillCenter,
     openToolCenter,
+    heartbeatTasks,
+    heartbeatRuns,
+    heartbeatLoading,
+    heartbeatError,
+    heartbeatTogglingId,
+    deletingHeartbeatTaskId,
+    runningHeartbeatTaskId,
     promptError,
     promptLoading,
     promptResetting,
@@ -458,13 +593,17 @@ export function useCenters({
     toolSaveFeedbackTone,
     toolSections,
     toolTogglingId,
+    handleDeleteHeartbeat,
+    handleRunHeartbeatNow,
     handleDeleteThread,
     handleResetPrompt,
     handleResetSkill,
     handleSavePrompt,
     handleSaveSkill,
     handleSelectThread,
+    handleToggleHeartbeat,
     handleToggleTool,
+    selectHeartbeatTask,
     selectPrompt,
     selectSkill,
     selectTool,
@@ -473,6 +612,7 @@ export function useCenters({
     closePromptModal,
     closeSkillModal,
     closeToolModal,
+    closeHeartbeatModal,
     closeHistoryModal,
   };
 }

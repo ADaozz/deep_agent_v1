@@ -1154,6 +1154,7 @@ button {
   color: var(--text-dim);
   line-height: 1.7;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .timeline-side {
@@ -1331,6 +1332,10 @@ button {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.heartbeat-detail-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .worker-metric-grid {
   grid-template-columns: minmax(110px, 0.8fr) minmax(140px, 0.9fr) minmax(220px, 1.6fr);
   align-items: stretch;
@@ -1385,6 +1390,16 @@ button {
   grid-column: span 2;
 }
 
+.heartbeat-detail-grid .info-card.wide {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 900px) {
+  .heartbeat-detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .tool-docstring {
   max-height: min(56vh, 560px);
   overflow-x: auto;
@@ -1401,6 +1416,41 @@ button {
   scrollbar-gutter: stable;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.heartbeat-summary-value {
+  max-height: min(34vh, 360px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 10px 12px;
+  padding-right: 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel-alt) 72%, var(--panel));
+}
+
+.heartbeat-status-value {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.heartbeat-status-value.is-success {
+  color: var(--success);
+}
+
+.heartbeat-status-value.is-running {
+  color: var(--accent);
+}
+
+.heartbeat-status-value.is-blocked {
+  color: var(--warning);
+}
+
+.heartbeat-status-value.is-error {
+  color: var(--danger);
 }
 
 .tool-content {
@@ -1466,6 +1516,15 @@ button {
   flex-direction: column;
 }
 
+.modal-card.is-heartbeat-center {
+  width: min(100%, 1320px);
+  height: min(92vh, 920px);
+  max-height: min(92vh, 920px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
 .modal-card.is-file-preview {
   width: min(100%, 1440px);
   height: min(94vh, 980px);
@@ -1504,6 +1563,28 @@ button {
   gap: 16px;
   min-height: 0;
   flex: 1 1 auto;
+}
+
+.heartbeat-browser {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.heartbeat-browser .prompt-nav {
+  max-height: min(34vh, 320px);
+}
+
+.heartbeat-browser .prompt-content {
+  overflow: auto;
+}
+
+.heartbeat-content {
+  overflow: auto;
+}
+
+.heartbeat-prompt-stack {
+  height: auto;
+  min-height: max-content;
 }
 
 .prompt-nav,
@@ -2175,6 +2256,96 @@ button {
   box-shadow: none;
 }
 
+.heartbeat-task-card {
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 50%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--panel) 90%, white 10%), color-mix(in srgb, var(--panel) 96%, transparent)),
+    var(--surface);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+}
+
+.heartbeat-task-card .tool-nav-main {
+  padding: 0;
+}
+
+.heartbeat-task-card .prompt-nav-title {
+  word-break: keep-all;
+}
+
+.heartbeat-nav-meta {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.heartbeat-card-actions {
+  justify-content: flex-end;
+  padding-top: 2px;
+}
+
+.heartbeat-run-button,
+.heartbeat-detail-run-button {
+  justify-content: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.heartbeat-run-button {
+  padding-inline: 12px;
+}
+
+.heartbeat-card-actions .tool-switch {
+  width: auto;
+  justify-content: center;
+  min-height: 34px;
+  padding: 8px 10px;
+  font-size: 12px;
+  gap: 8px;
+}
+
+.heartbeat-card-actions .history-thread-delete {
+  align-self: stretch;
+  margin: 0;
+  min-height: 34px;
+  padding: 0;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 24%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 18%, transparent);
+}
+
+.heartbeat-card-actions .history-thread-delete .h-4,
+.heartbeat-card-actions .history-thread-delete .w-4 {
+  width: 15px;
+  height: 15px;
+}
+
+.heartbeat-card-actions .history-thread-delete:hover {
+  border-color: color-mix(in srgb, var(--danger) 36%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 32%, transparent);
+}
+
+.heartbeat-detail-actions {
+  width: 100%;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.heartbeat-detail-actions .history-thread-delete {
+  margin: 0;
+  align-self: center;
+  min-height: 40px;
+  min-width: 40px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 24%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 18%, transparent);
+}
+
+.heartbeat-detail-actions .history-thread-delete:hover {
+  border-color: color-mix(in srgb, var(--danger) 36%, transparent);
+  background: color-mix(in srgb, var(--danger-soft) 32%, transparent);
+}
+
 .history-thread-delete {
   flex: 0 0 auto;
   align-self: flex-start;
@@ -2221,6 +2392,18 @@ button {
   white-space: normal;
   overflow: visible;
   word-break: break-word;
+}
+
+@media (max-width: 920px) {
+  .heartbeat-task-card {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .heartbeat-card-actions {
+    width: 100%;
+    padding-top: 0;
+  }
 }
 
 .history-thread-meta {
@@ -2462,6 +2645,10 @@ button {
   .stats-row,
   .dashboard-grid,
   .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .heartbeat-detail-grid {
     grid-template-columns: 1fr;
   }
 

@@ -51,6 +51,12 @@ export function normalizeUiState(snapshot = {}) {
         : typeof snapshot.show_tool_modal === "boolean"
           ? snapshot.show_tool_modal
           : DEFAULT_UI_STATE.showToolModal,
+    showHeartbeatModal:
+      typeof snapshot.showHeartbeatModal === "boolean"
+        ? snapshot.showHeartbeatModal
+        : typeof snapshot.show_heartbeat_modal === "boolean"
+          ? snapshot.show_heartbeat_modal
+          : DEFAULT_UI_STATE.showHeartbeatModal,
     showArtifactModal:
       typeof snapshot.showArtifactModal === "boolean"
         ? snapshot.showArtifactModal
@@ -75,6 +81,12 @@ export function normalizeUiState(snapshot = {}) {
         : typeof snapshot.active_tool_id === "string"
           ? snapshot.active_tool_id
           : DEFAULT_UI_STATE.activeToolId,
+    activeHeartbeatTaskId:
+      typeof snapshot.activeHeartbeatTaskId === "string"
+        ? snapshot.activeHeartbeatTaskId
+        : typeof snapshot.active_heartbeat_task_id === "string"
+          ? snapshot.active_heartbeat_task_id
+          : DEFAULT_UI_STATE.activeHeartbeatTaskId,
     promptDraft:
       typeof snapshot.promptDraft === "string"
         ? snapshot.promptDraft
@@ -111,10 +123,12 @@ export function buildUiStateSnapshot(uiState) {
     showSkillModal: false,
     showHistoryModal: false,
     showToolModal: false,
+    showHeartbeatModal: false,
     showArtifactModal: false,
     activePromptId: normalized.activePromptId,
     activeSkillId: normalized.activeSkillId,
     activeToolId: normalized.activeToolId,
+    activeHeartbeatTaskId: normalized.activeHeartbeatTaskId,
     promptDraft: normalized.promptDraft,
     skillDraft: normalized.skillDraft,
     selectedAgentId: normalized.selectedAgentId,
@@ -125,6 +139,7 @@ export function buildUiStateSnapshot(uiState) {
 export function cloneBaseState() {
   return {
     ...EMPTY_STATE,
+    execution_mode: "divide_and_conquer",
     tasks: [],
     rounds: [],
     agents: [],
@@ -159,6 +174,10 @@ export function normalizeSessionState(snapshot = {}) {
   return {
     ...cloneBaseState(),
     ...(snapshot || {}),
+    execution_mode:
+      typeof snapshot?.execution_mode === "string" && snapshot.execution_mode.trim()
+        ? snapshot.execution_mode.trim()
+        : "divide_and_conquer",
     tasks: Array.isArray(snapshot?.tasks) ? snapshot.tasks : [],
     rounds: Array.isArray(snapshot?.rounds) ? snapshot.rounds : [],
     agents: Array.isArray(snapshot?.agents) ? snapshot.agents.map((agent) => normalizeAgent(agent)) : [],
@@ -338,6 +357,33 @@ export function formatUtc8Timestamp(value) {
     second: "2-digit",
     hour12: false,
   }).format(date);
+}
+
+export function formatRelativeHeartbeatTime(task) {
+  const now = Date.now();
+  const status = String(task?.status || "").toLowerCase();
+  if (status === "running") return "执行中";
+  const nextRunAt = task?.next_run_at ? new Date(task.next_run_at).getTime() : NaN;
+  const lastRunAt = task?.last_run_at ? new Date(task.last_run_at).getTime() : NaN;
+  if (Number.isFinite(nextRunAt) && nextRunAt > now && nextRunAt - now <= 12 * 60 * 60 * 1000) {
+    return `${formatDuration(nextRunAt - now)}开始执行`;
+  }
+  if (Number.isFinite(lastRunAt) && lastRunAt <= now) {
+    return `${formatDuration(now - lastRunAt)}完成执行`;
+  }
+  if (Number.isFinite(nextRunAt) && nextRunAt > now) {
+    return `${formatDuration(nextRunAt - now)}开始执行`;
+  }
+  return "等待执行";
+}
+
+function formatDuration(deltaMs) {
+  const totalMinutes = Math.max(1, Math.floor(deltaMs / 60000));
+  if (totalMinutes < 60) return `${totalMinutes}分钟后`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (!minutes) return `${hours}小时后`;
+  return `${hours}小时${minutes}分钟后`;
 }
 
 export function formatFileSize(value) {

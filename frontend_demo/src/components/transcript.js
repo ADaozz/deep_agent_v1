@@ -548,6 +548,7 @@ export const SessionTranscript = {
     const state = computed(() => props.session.state || {});
     const userFiles = computed(() => Array.isArray(state.value.user_files) ? state.value.user_files : []);
     const completedCount = computed(() => (state.value.tasks || []).filter((task) => stepState(task.status) === "success").length);
+    const showActionList = computed(() => state.value.execution_mode !== "direct_supervisor" && (state.value.tasks || []).length);
     const hasWorkerActivity = computed(() => (state.value.agents || []).some(
       (agent) => agent.current_task_title || agent.report || agent.guard_hits || agent.last_guard_message || (agent.todo_list && agent.todo_list.length)
     ));
@@ -556,6 +557,7 @@ export const SessionTranscript = {
       state,
       userFiles,
       completedCount,
+      showActionList,
       hasWorkerActivity,
       terminalIncomplete,
       stepState,
@@ -574,7 +576,7 @@ export const SessionTranscript = {
         <LoadedSkillList :skills="state.loaded_skills || []" />
       </ChatBubble>
 
-      <ChatBubble v-if="(state.tasks || []).length" title="Action List" eyebrow="Execution" :icon="icons.ClipboardList">
+      <ChatBubble v-if="showActionList" title="Action List" eyebrow="Execution" :icon="icons.ClipboardList">
         <SectionTitle
           :icon="icons.ClipboardList"
           title="任务追踪"

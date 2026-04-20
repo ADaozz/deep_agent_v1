@@ -30,7 +30,7 @@ import {
   StatusCard,
   ThemeSwitcher,
 } from "./components/common.js";
-import { HistoryCenter, PromptCenter, SkillCenter, ToolCenter } from "./components/centers.js";
+import { HeartbeatCenter, HistoryCenter, PromptCenter, SkillCenter, ToolCenter } from "./components/centers.js";
 import { FilePreviewContent, SessionTranscript } from "./components/transcript.js";
 import { useUploads } from "./composables/useUploads.js";
 import { useArtifacts } from "./composables/useArtifacts.js";
@@ -44,6 +44,7 @@ export default {
     ArtifactCardList,
     FilePreviewContent,
     HistoryCenter,
+    HeartbeatCenter,
     InfoCard,
     Modal,
     PendingUploadList,
@@ -129,6 +130,10 @@ export default {
       centers.closeToolModal();
     }
 
+    function closeHeartbeatModal() {
+      centers.closeHeartbeatModal();
+    }
+
     function closeHistoryModal() {
       centers.closeHistoryModal();
     }
@@ -183,12 +188,15 @@ export default {
       closeArtifactModal,
       closeDeleteConfirm,
       closeHistoryModal,
+      closeHeartbeatModal,
       closePromptModal,
       closeSkillModal,
       closeToolModal,
       completedCount: runtime.completedCount,
       deleteConfirm: centers.deleteConfirm,
       deletingThreadId: centers.deletingThreadId,
+      deletingHeartbeatTaskId: centers.deletingHeartbeatTaskId,
+      runningHeartbeatTaskId: centers.runningHeartbeatTaskId,
       demoState,
       error,
       fileInput,
@@ -196,6 +204,8 @@ export default {
       handleChooseUserFile: () => uploads.handleChooseUserFile(fileInput),
       handleComposerKeyDown: runtime.handleComposerKeyDown,
       handleDeleteThread: centers.handleDeleteThread,
+      handleDeleteHeartbeat: centers.handleDeleteHeartbeat,
+      handleRunHeartbeatNow: centers.handleRunHeartbeatNow,
       handleNewThread: runtime.handleNewThread,
       handleOpenArtifact: artifacts.handleOpenArtifact,
       handlePendingFileChange: uploads.handlePendingFileChange,
@@ -209,10 +219,16 @@ export default {
       handleSelectThread: centers.handleSelectThread,
       handleStop: runtime.handleStop,
       handleToggleTool: centers.handleToggleTool,
+      handleToggleHeartbeat: centers.handleToggleHeartbeat,
       headerStatus: runtime.headerStatus,
       historyThreads: centers.historyThreads,
       historyThreadsError: centers.historyThreadsError,
       historyThreadsLoading: centers.historyThreadsLoading,
+      heartbeatTasks: centers.heartbeatTasks,
+      heartbeatRuns: centers.heartbeatRuns,
+      heartbeatLoading: centers.heartbeatLoading,
+      heartbeatError: centers.heartbeatError,
+      heartbeatTogglingId: centers.heartbeatTogglingId,
       icons,
       interactionLocked,
       isEditableArtifact: artifacts.isEditableArtifact,
@@ -223,6 +239,7 @@ export default {
       openAgent,
       openDeleteConfirm,
       openHistoryCenter: centers.openHistoryCenter,
+      openHeartbeatCenter: centers.openHeartbeatCenter,
       openPromptCenter: centers.openPromptCenter,
       openSkillCenter: centers.openSkillCenter,
       openToolCenter: centers.openToolCenter,
@@ -236,6 +253,7 @@ export default {
       promptSaving: centers.promptSaving,
       promptSections: centers.promptSections,
       runningCount: runtime.runningCount,
+      selectHeartbeatTask: centers.selectHeartbeatTask,
       selectPrompt,
       selectSkill,
       selectTool,
@@ -288,6 +306,10 @@ export default {
           <button type="button" :class="['side-menu-button', uiState.showToolModal ? 'is-active' : '']" title="管理项目扩展工具" @click="openToolCenter">
             <component :is="icons.SlidersHorizontal" class="h-4 w-4" />
             <span>工具</span>
+          </button>
+          <button type="button" :class="['side-menu-button', uiState.showHeartbeatModal ? 'is-active' : '']" title="查看智能心跳任务" @click="openHeartbeatCenter">
+            <component :is="icons.HeartPulse" class="h-4 w-4" />
+            <span>智能心跳</span>
           </button>
         </div>
       </aside>
@@ -456,6 +478,23 @@ export default {
           :save-feedback-tone="toolSaveFeedbackTone"
           @select="selectTool"
           @toggle="handleToggleTool"
+        />
+      </Modal>
+
+      <Modal :open="uiState.showHeartbeatModal" title="智能心跳" eyebrow="Heartbeat" variant="heartbeat-center" @close="closeHeartbeatModal">
+        <HeartbeatCenter
+          :tasks="heartbeatTasks"
+          :runs="heartbeatRuns"
+          :active-task-id="uiState.activeHeartbeatTaskId"
+          :loading="heartbeatLoading"
+          :error="heartbeatError"
+          :toggling-task-id="heartbeatTogglingId"
+          :deleting-task-id="deletingHeartbeatTaskId"
+          :running-task-id="runningHeartbeatTaskId"
+          @select-task="selectHeartbeatTask"
+          @toggle-task="handleToggleHeartbeat"
+          @run-task="handleRunHeartbeatNow"
+          @delete-task="handleDeleteHeartbeat"
         />
       </Modal>
 

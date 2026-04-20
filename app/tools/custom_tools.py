@@ -14,10 +14,16 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
-from app.config import PROJECT_ROOT, env_bool, env_int, env_str
+from app.config import PROJECT_ROOT, env_bool, env_int, env_str, load_settings
+from app.heartbeat_store import create_heartbeat_task as create_heartbeat_task_record
+from app.heartbeat_store import current_datetime_payload
+from app.runtime_context import get_run_mode
+from app.workspace_files import WORKSPACE_ROOT, resolve_workspace_file
 
 
 CUSTOM_TOOL_METADATA = {
+    "create_heartbeat_task": {"scope": "supervisor"},
+    "get_current_datetime": {"scope": "supervisor"},
     "resolve_cmdb_service_context": {"scope": "shared"},
     "send_email_with_attachment": {"scope": "supervisor"},
     "tavily_search": {"scope": "worker"},
@@ -89,7 +95,6 @@ def _format_tavily_failure(query: str, failures: list[str]) -> str:
 CMDB_ROOT = PROJECT_ROOT / "sys_cmdb"
 CMDB_MARKDOWN = CMDB_ROOT / "CMDB.md"
 DEPLOYMENT_MAP_ROOT = CMDB_ROOT / "deployment_map"
-WORKSPACE_ROOT = PROJECT_ROOT / "workspace"
 
 
 class RelatedService(BaseModel):
@@ -140,19 +145,27 @@ def _mail_settings() -> dict[str, object]:
     }
 
 
-def _resolve_mail_attachment_path(attachment_path: str) -> Path:
-    raw_path = attachment_path.strip()
-    if not raw_path:
-        raise ValueError("缺少 attachment_path。")
-    path = Path(raw_path)
-    candidate = path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
-    if not candidate.exists() or not candidate.is_file():
-        raise FileNotFoundError(f"附件不存在: {raw_path}")
-    try:
-        candidate.relative_to(PROJECT_ROOT)
-    except ValueError as exc:
-        raise ValueError("附件路径必须位于项目目录内。") from exc
-    return candidate
+def _normalize_workspace_relative_paths(paths: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in paths:
+        raw_path = str(item).strip()
+        if not raw_path:
+            continue
+        file_path = resolve_workspace_file(raw_path)
+        relative_path = file_path.relative_to(WORKSPACE_ROOT.resolve()).as_posix()
+        if relative_path in seen:
+            continue
+        seen.add(relative_path)
+        normalized.append(relative_path)
+    return normalized
+
+
+def _resolve_mail_attachment_paths(attachment_paths: list[str]) -> list[Path]:
+    normalized = _normalize_workspace_relative_paths(attachment_paths)
+    if not normalized:
+        raise ValueError("缺少 attachment_paths。")
+    return [resolve_workspace_file(item) for item in normalized]
 
 
 def _html_to_plain_text(html_body: str) -> str:
@@ -174,6 +187,24 @@ def _attach_file(message: EmailMessage, attachment_file: Path) -> None:
         subtype=subtype,
         filename=attachment_file.name,
     )
+
+
+def _sanitize_heartbeat_query(query: str) -> str:
+    cleaned = str(query).strip()
+    if not cleaned:
+        return cleaned
+    patterns = [
+        r"^\s*每天(?:早上|上午|中午|下午|晚上|凌晨)?\s*\d{1,2}(?::\d{2})?\s*(?:点|执行|运行|触发|发送)?\s*",
+        r"^\s*每天(?:早上|上午|中午|下午|晚上|凌晨)?\s*[零一二三四五六七八九十两\d]{1,3}\s*点(?:\s*[零一二三四五六七八九十两\d]{1,3}\s*分)?\s*",
+        r"^\s*每月\s*[零一二三四五六七八九十两\d]{1,3}\s*(?:号|日).{0,12}?",
+        r"^\s*每周[一二三四五六日天]\s*",
+        r"^\s*(?:10天后|[零一二三四五六七八九十两\d]+天后|明天|后天|下周[一二三四五六日天])\s*",
+    ]
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned, count=1)
+    cleaned = re.sub(r"^\s*(向我|给我|帮我)\s*", "", cleaned, count=1)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" ，。；;")
+    return cleaned or str(query).strip()
 
 
 @lru_cache(maxsize=1)
@@ -526,17 +557,23 @@ def ssh_execute(host_ip: str, command: str) -> str:
 
 
 @tool
-def send_email_with_attachment(target_email: str, html_body: str, attachment_path: str) -> str:
-    """向目标邮箱发送 HTML 邮件，并附带一个项目目录内的附件。
+def send_email_with_attachment(
+    target_email: str,
+    html_body: str,
+    attachment_paths: list[str] | None = None,
+    attachment_path: str = "",
+) -> str:
+    """向目标邮箱发送 HTML 邮件，并附带一个或多个当前文件根目录内的附件。
 
     何时使用：
     - supervisor 已生成报告、结论或文件，需要通过邮件发送给指定收件人。
     - 用户明确要求邮件通知或邮件投递。
 
     使用边界：
-    - 只接受一个目标邮箱、HTML 正文和一个附件路径。
-    - 附件路径优先使用项目根目录内的相对路径，例如 `result/report.md` 或 `workspace/report.md`。
-    - 不要传目录路径；只允许传单个已存在文件。
+    - 接受一个目标邮箱、HTML 正文和一组附件路径。
+    - 附件路径必须使用当前文件根目录内的相对路径，例如 `report.md` 或 `subdir/report.md`。
+    - 不要传绝对路径，不要传 `workspace/` 或 `/workspace/` 前缀。
+    - 不要传目录路径；每个路径都必须指向一个已存在文件。
 
     推荐邮件模板（中文正式通用版）：
     - 标题模板：`【情况说明/结果通知】{主题关键词}`
@@ -558,7 +595,7 @@ def send_email_with_attachment(target_email: str, html_body: str, attachment_pat
     - 附件是主要信息载体时，正文只做摘要，不要重复整份报告。
 
     返回：
-    - JSON 字符串，包含 recipient、subject、attachment_path 和 status。
+    - JSON 字符串，包含 recipient、subject、attachment_paths 和 status。
     """
     recipient = target_email.strip()
     if not recipient:
@@ -572,14 +609,18 @@ def send_email_with_attachment(target_email: str, html_body: str, attachment_pat
         smtp_password = str(settings["smtp_password"]).strip()
         if not smtp_user or not smtp_password:
             return "send_email_with_attachment 失败：邮件凭据未配置，请检查 .env 中的 DEEP_AGENT_MAIL_* 配置。"
-        attachment_file = _resolve_mail_attachment_path(attachment_path)
+        raw_paths = list(attachment_paths or [])
+        if attachment_path.strip():
+            raw_paths.append(attachment_path.strip())
+        attachment_files = _resolve_mail_attachment_paths(raw_paths)
         message = EmailMessage()
         message["From"] = f'{settings["from_name"]} <{smtp_user}>'
         message["To"] = recipient
         message["Subject"] = str(settings["subject"])
         message.set_content(_html_to_plain_text(html_body))
         message.add_alternative(html_body, subtype="html")
-        _attach_file(message, attachment_file)
+        for attachment_file in attachment_files:
+            _attach_file(message, attachment_file)
 
         with smtplib.SMTP_SSL(str(settings["smtp_host"]), int(settings["smtp_port"])) as smtp:
             smtp.login(smtp_user, smtp_password)
@@ -591,7 +632,95 @@ def send_email_with_attachment(target_email: str, html_body: str, attachment_pat
         "status": "sent",
         "recipient": recipient,
         "subject": str(settings["subject"]),
-        "attachment_path": attachment_file.relative_to(PROJECT_ROOT).as_posix(),
+        "attachment_paths": [item.relative_to(WORKSPACE_ROOT.resolve()).as_posix() for item in attachment_files],
         "sender": smtp_user,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+@tool
+def get_current_datetime(timezone: str = "Asia/Hong_Kong") -> str:
+    """获取当前日期时间，用于将“10天后”“下周一”这类相对时间转换为绝对执行时间。
+
+    何时使用：
+    - supervisor 需要基于“现在”来创建一次性 heartbeat 任务。
+    - 用户给出的时间表达是相对时间，而不是明确的绝对时间戳。
+
+    返回：
+    - JSON 字符串，包含 now_iso、date、time、weekday、timezone、unix_ts。
+    """
+    try:
+        payload = current_datetime_payload(timezone=timezone)
+    except Exception as exc:  # noqa: BLE001
+        return f"get_current_datetime 失败：{type(exc).__name__}: {exc}"
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+@tool
+def create_heartbeat_task(
+    title: str,
+    query: str,
+    schedule_kind: str,
+    schedule_type: str = "",
+    schedule_expr: str = "",
+    run_at: str = "",
+    timezone: str = "Asia/Hong_Kong",
+) -> str:
+    """创建智能心跳任务。
+
+    何时使用：
+    - 用户希望系统在未来某个时间点或某个周期自动触发 agent 执行一遍任务。
+    - 任务需要长期巡检（例如每月一号）或一次性提醒（例如 10 天后）。
+
+    参数规则：
+    - `schedule_kind` 只允许 `oneshot` 或 `recurring`
+    - `oneshot`：必须提供 `run_at`，且不能继续提供 `schedule_type/schedule_expr`
+    - `recurring`：必须提供 `schedule_type` 和 `schedule_expr`
+    - `schedule_type` 只允许 `cron` 或 `interval`
+    - `interval` 的 `schedule_expr` 单位为秒
+
+    硬约束：
+    - 该工具只应由 supervisor 使用
+    - 当前执行上下文是 heartbeat 时，禁止继续创建新的 heartbeat 任务，防止递归
+    - `query` 应只保留真正的执行内容，不要把“每天早上 9:00”“10 天后”这类调度字样重复写进执行 prompt
+
+    返回：
+    - JSON 字符串，包含 task_id、title、schedule 信息和 next_run_at。
+    """
+    if get_run_mode() == "heartbeat":
+        return "create_heartbeat_task 失败：heartbeat 执行上下文内禁止创建新的 heartbeat 任务。"
+
+    try:
+        settings = load_settings(argv=[])
+        normalized_query = _sanitize_heartbeat_query(query)
+        record = create_heartbeat_task_record(
+            settings=settings,
+            title=title,
+            query_text=normalized_query,
+            schedule_kind=schedule_kind,
+            schedule_type=schedule_type,
+            schedule_expr=schedule_expr,
+            run_at=run_at,
+            timezone=timezone,
+            created_by="supervisor",
+            runtime_config={"source": "tool:create_heartbeat_task"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"create_heartbeat_task 失败：{type(exc).__name__}: {exc}"
+
+    return json.dumps(
+        {
+            "status": "created",
+            "task_id": record["task_id"],
+            "title": record["title"],
+            "schedule_kind": record["schedule_kind"],
+            "schedule_type": record["schedule_type"],
+            "schedule_expr": record["schedule_expr"],
+            "run_at": record["run_at"],
+            "timezone": record["timezone"],
+            "next_run_at": record["next_run_at"],
+            "enabled": record["enabled"],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
