@@ -304,7 +304,7 @@ flowchart LR
 - `app/tools/custom_tools.py`
   - 统一管理可开关的项目扩展工具
   - 后端会自动嗅探其中被 `@tool` 修饰的函数并展示到工具控制台
-  - 当前包含 `ssh_execute(host_ip, command)`、`tavily_search(...)`、`resolve_cmdb_service_context(query)`
+  - 当前包含 `ssh_execute(host_ip, command)`、`tavily_search(...)`、`resolve_cmdb_service_context(query)`、`send_email_with_attachment(target_email, html_body, attachment_path)`
   - 工具的 `scope` 直接在源码里的 `CUSTOM_TOOL_METADATA` 声明，不再在 registry 中单独维护 override
 
 - `app/tool_registry.py`
@@ -969,6 +969,13 @@ DEEP_AGENT_SSH_STRICT_HOST_KEY=false
   - 由 [custom_tools.py](app/tools/custom_tools.py) 提供，并可在工具控制台开关
   - 内部会读取 `sys_cmdb/CMDB.md`，抽取与 query 相关的服务及一跳上下游，再到 `sys_cmdb/deployment_map/*.json` 匹配部署信息
   - 当前通过 `scope=shared` 同时暴露给 supervisor 和 worker
+
+- `send_email_with_attachment(target_email, html_body, attachment_path)`
+  - 不是框架默认工具
+  - 由 [custom_tools.py](app/tools/custom_tools.py) 提供，并可在工具控制台开关
+  - 使用 SMTP SSL 发送 HTML 邮件，并附带单个项目目录内附件
+  - 当前通过 `scope=supervisor` 只暴露给 supervisor
+  - 适合报告通知、结果投递、附件发送这类最终交付动作
 
 - `publish_workspace_file(relative_path, title="")`
   - 不是框架默认工具

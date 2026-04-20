@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from deepagents import create_deep_agent
 from deepagents.backends import FilesystemBackend
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
@@ -14,6 +15,7 @@ from app.backends import DockerWorkspaceBackend
 from app.config import Settings
 from app.prompts import (
     build_supervisor_system_prompt,
+    get_bootstrap_supervisor_prompt,
     get_runtime_worker_planner_prompt,
 )
 from app.skill_store import (
@@ -58,23 +60,25 @@ class RuntimeWorkerPlan(BaseModel):
     )
 
 
-class SupervisorSkillSelection(BaseModel):
-    skill_ids: list[str] = Field(
-        default_factory=list,
-        description="当前 query 命中的 supervisor skill id 列表。",
-    )
-    reasoning: str = Field(
-        default="",
-        description="为什么这些 supervisor skill 与当前 query 相关。",
-    )
-
-
 class BootstrapTaskProfile(BaseModel):
     objective: str = Field(default="", description="对当前任务目标的简明理解。")
     constraints: list[str] = Field(default_factory=list, description="执行约束。")
     expected_deliverables: list[str] = Field(default_factory=list, description="预期产物。")
     decomposition_axes: list[str] = Field(default_factory=list, description="如果要拆分，最自然的拆分维度。")
     reasoning: str = Field(default="", description="当前任务为什么会落入这类执行路径。")
+
+
+class BootstrapContextRecord(BaseModel):
+    selected_skill_ids: list[str] = Field(default_factory=list, description="bootstrap 阶段命中的 supervisor skill id 列表。")
+    selected_skills_reasoning_by_id: dict[str, str] = Field(
+        default_factory=dict,
+        description="每个命中的 supervisor skill 的命中理由。",
+    )
+    objective: str = Field(default="", description="对当前任务目标的简明理解。")
+    constraints: list[str] = Field(default_factory=list, description="执行约束。")
+    expected_deliverables: list[str] = Field(default_factory=list, description="预期产物。")
+    decomposition_axes: list[str] = Field(default_factory=list, description="最自然的拆分维度。")
+    reasoning: str = Field(default="", description="为什么后续 supervisor 应按此路径推进。")
 
 
 def _build_subagent_spec(
@@ -101,6 +105,38 @@ def _build_subagent_spec(
         "middleware": [middleware_cls()] if middleware_cls is not None else [],
         "dynamic": dynamic,
     }
+
+
+def _make_record_bootstrap_context_tool():
+    @tool("record_bootstrap_context", args_schema=BootstrapContextRecord)
+    def record_bootstrap_context(
+        selected_skill_ids: list[str] | None = None,
+        selected_skills_reasoning_by_id: dict[str, str] | None = None,
+        objective: str = "",
+        constraints: list[str] | None = None,
+        expected_deliverables: list[str] | None = None,
+        decomposition_axes: list[str] | None = None,
+        reasoning: str = "",
+    ) -> str:
+        """记录 bootstrap supervisor 选中的 skills、第一版任务理解和拆分依据。"""
+        normalized_selected_skill_ids = normalize_supervisor_skill_ids(selected_skill_ids or [])
+        normalized_skill_reasons: dict[str, str] = {}
+        for skill_id in normalized_selected_skill_ids:
+            reason = str((selected_skills_reasoning_by_id or {}).get(skill_id, "")).strip()
+            if reason:
+                normalized_skill_reasons[skill_id] = reason
+        payload = BootstrapContextRecord(
+            selected_skill_ids=normalized_selected_skill_ids,
+            selected_skills_reasoning_by_id=normalized_skill_reasons,
+            objective=objective.strip(),
+            constraints=[str(item).strip() for item in constraints or [] if str(item).strip()],
+            expected_deliverables=[str(item).strip() for item in expected_deliverables or [] if str(item).strip()],
+            decomposition_axes=[str(item).strip() for item in decomposition_axes or [] if str(item).strip()],
+            reasoning=reasoning.strip(),
+        )
+        return json.dumps(payload.model_dump(), ensure_ascii=False)
+
+    return record_bootstrap_context
 
 
 def _disabled_fallback_spec(runtime_tools: dict[str, Any]) -> dict[str, Any]:
@@ -139,36 +175,79 @@ def build_agent(settings: Settings, query: str | None = None):
     return agent
 
 
+def build_bootstrap_agent(
+    settings: Settings,
+    query: str | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    runtime_query = (query or settings.prompt).strip()
+    runtime_tools = load_runtime_tool_bundle()
+    backend = _make_backend(settings)
+    model = _make_model(settings)
+    agent_tools: list[Any] = [
+        runtime_tools["inspect_supervisor_skills_factory"](),
+        _make_record_bootstrap_context_tool(),
+    ]
+    subagents = [
+        {
+            "name": spec["name"],
+            "description": spec["description"],
+            "system_prompt": spec["system_prompt"],
+            "tools": spec["tools"],
+            "middleware": spec["middleware"],
+        }
+        for spec in get_subagent_specs(runtime_tools)
+    ]
+    agent = create_deep_agent(
+        model=model,
+        tools=agent_tools,
+        subagents=subagents,
+        system_prompt=get_bootstrap_supervisor_prompt(),
+        backend=backend,
+        name="bootstrap_supervisor",
+        debug=True,
+    )
+    return agent, {"query": runtime_query}
+
+
 def build_agent_bundle(
     settings: Settings,
     query: str | None = None,
+    bootstrap_meta: dict[str, Any] | None = None,
 ) -> tuple[Any, list[dict[str, str]], dict[str, Any]]:
     runtime_query = (query or settings.prompt).strip()
     model = _make_model(settings)
     runtime_tools = load_runtime_tool_bundle()
-    selected_skill_ids, skill_selection_reasoning, skill_selection_error = _select_supervisor_skill_ids(
-        model=model,
-        query=runtime_query,
+    (
+        selected_skill_ids,
+        skill_selection_reasoning,
+        skill_selection_error,
+        selected_skills_reasoning_by_id,
+        bootstrap_task_profile,
+        bootstrap_task_error,
+        bootstrap_todos,
+    ) = _resolve_bootstrap_meta(
+        bootstrap_meta=bootstrap_meta or {},
     )
     supervisor_skill_context = build_supervisor_skill_prompt_suffix(skill_ids=selected_skill_ids)
-    bootstrap_task_profile, bootstrap_task_error = _build_bootstrap_task_profile(
-        model=model,
-        query=runtime_query,
-        supervisor_skill_context=supervisor_skill_context,
-    )
+    bootstrap_skill_reasoning_context = _render_bootstrap_skill_reasoning_context(selected_skills_reasoning_by_id)
     bootstrap_task_context = _render_bootstrap_task_context(bootstrap_task_profile)
+    bootstrap_action_list_context = _render_bootstrap_action_list_context(bootstrap_todos)
     runtime_specs, roster_payload = _build_runtime_subagent_specs(
         model=model,
         query=runtime_query,
         runtime_tools=runtime_tools,
         supervisor_skill_context=supervisor_skill_context,
+        bootstrap_skill_reasoning_context=bootstrap_skill_reasoning_context,
         bootstrap_task_context=bootstrap_task_context,
+        bootstrap_action_list_context=bootstrap_action_list_context,
     )
     runtime_catalog = roster_payload["workers"]
     system_prompt = build_supervisor_system_prompt(
         max_rounds=12,
         selected_skill_ids=selected_skill_ids,
+        bootstrap_skill_reasoning_context=bootstrap_skill_reasoning_context,
         bootstrap_task_context=bootstrap_task_context,
+        bootstrap_action_list_context=bootstrap_action_list_context,
     )
     agent_tools: list[Any] = []
     agent_tools.append(runtime_tools["inspect_supervisor_skills_factory"]())
@@ -208,11 +287,48 @@ def build_agent_bundle(
         "selected_skill_headers": [
             header for header in list_supervisor_skill_headers() if header["id"] in set(selected_skill_ids)
         ],
+        "selected_skills_reasoning_by_id": selected_skills_reasoning_by_id,
         "skill_selection_reasoning": skill_selection_reasoning,
         "skill_selection_error": skill_selection_error,
         "bootstrap_task_profile": bootstrap_task_profile.model_dump(),
         "bootstrap_task_error": bootstrap_task_error,
+        "bootstrap_todos": bootstrap_todos,
     }
+
+
+def _resolve_bootstrap_meta(
+    *,
+    bootstrap_meta: dict[str, Any],
+) -> tuple[list[str], str, str, dict[str, str], BootstrapTaskProfile, str, list[dict[str, str]]]:
+    selected_skill_ids = normalize_supervisor_skill_ids(bootstrap_meta.get("selected_skill_ids") or [])
+    skill_selection_reasoning = str(bootstrap_meta.get("skill_selection_reasoning") or "").strip()
+    skill_selection_error = str(bootstrap_meta.get("skill_selection_error") or "").strip()
+    raw_skill_reasoning = bootstrap_meta.get("selected_skills_reasoning_by_id") or {}
+    selected_skills_reasoning_by_id: dict[str, str] = {}
+    if isinstance(raw_skill_reasoning, dict):
+        for skill_id in selected_skill_ids:
+            reason = str(raw_skill_reasoning.get(skill_id, "")).strip()
+            if reason:
+                selected_skills_reasoning_by_id[skill_id] = reason
+
+    profile_payload = bootstrap_meta.get("bootstrap_task_profile") or {}
+    bootstrap_task_profile = BootstrapTaskProfile()
+    bootstrap_task_error = str(bootstrap_meta.get("bootstrap_task_error") or "").strip()
+    bootstrap_todos = list(bootstrap_meta.get("bootstrap_todos") or [])
+    if isinstance(profile_payload, dict) and any(profile_payload.values()):
+        try:
+            bootstrap_task_profile = BootstrapTaskProfile(**profile_payload)
+        except Exception as exc:
+            bootstrap_task_error = _format_planner_error(exc)
+    return (
+        selected_skill_ids,
+        skill_selection_reasoning,
+        skill_selection_error,
+        selected_skills_reasoning_by_id,
+        bootstrap_task_profile,
+        bootstrap_task_error,
+        bootstrap_todos,
+    )
 
 
 def _build_runtime_subagent_specs(
@@ -221,14 +337,18 @@ def _build_runtime_subagent_specs(
     query: str,
     runtime_tools: dict[str, Any],
     supervisor_skill_context: str,
+    bootstrap_skill_reasoning_context: str,
     bootstrap_task_context: str,
+    bootstrap_action_list_context: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     base_specs = get_subagent_specs(runtime_tools)
     runtime_plan = _plan_query_workers(
         model=model,
         query=query,
         supervisor_skill_context=supervisor_skill_context,
+        bootstrap_skill_reasoning_context=bootstrap_skill_reasoning_context,
         bootstrap_task_context=bootstrap_task_context,
+        bootstrap_action_list_context=bootstrap_action_list_context,
         existing_specs=base_specs,
     )
     runtime_plan = _ensure_non_empty_worker_plan(
@@ -260,7 +380,9 @@ def _plan_query_workers(
     model: ChatOpenAI,
     query: str,
     supervisor_skill_context: str,
+    bootstrap_skill_reasoning_context: str,
     bootstrap_task_context: str,
+    bootstrap_action_list_context: str,
     existing_specs: list[dict[str, Any]],
 ) -> RuntimeWorkerPlan:
     planner = model.with_structured_output(RuntimeWorkerPlan, include_raw=True)
@@ -269,7 +391,9 @@ def _plan_query_workers(
             get_runtime_worker_planner_prompt().format(
                 query=query,
                 supervisor_skill_context=supervisor_skill_context.strip() or "无",
+                bootstrap_skill_reasoning_context=bootstrap_skill_reasoning_context.strip() or "无",
                 bootstrap_task_context=bootstrap_task_context.strip() or "无",
+                bootstrap_action_list_context=bootstrap_action_list_context.strip() or "无",
             )
         )
     except Exception as exc:
@@ -295,120 +419,6 @@ def _plan_query_workers(
     )
 
 
-def _select_supervisor_skill_ids(
-    *,
-    model: ChatOpenAI,
-    query: str,
-) -> tuple[list[str], str, str]:
-    skill_headers = list_supervisor_skill_headers()
-    if not skill_headers:
-        return [], "", ""
-
-    selector = model.with_structured_output(SupervisorSkillSelection, include_raw=True)
-    prompt = _build_supervisor_skill_selector_prompt(query=query, skill_headers=skill_headers)
-    try:
-        result = selector.invoke(prompt)
-    except Exception as exc:
-        return [], "", _format_planner_error(exc)
-
-    parsed = result.get("parsed")
-    if parsed is not None:
-        selected_ids = normalize_supervisor_skill_ids(parsed.skill_ids)
-        return selected_ids, parsed.reasoning.strip(), ""
-
-    raw = result.get("raw")
-    try:
-        content = getattr(raw, "content", None) or ""
-        payload = json.loads(content) if isinstance(content, str) else content
-        if isinstance(payload, dict):
-            selected_ids = normalize_supervisor_skill_ids(payload.get("skill_ids") or [])
-            reasoning = str(payload.get("reasoning") or "").strip()
-            return selected_ids, reasoning, ""
-    except Exception:
-        pass
-
-    return [], "", _format_planner_error(result.get("parsing_error") or Exception("skill_selector_parsing_failed"))
-
-
-def _build_supervisor_skill_selector_prompt(*, query: str, skill_headers: list[dict[str, Any]]) -> str:
-    headers_json = json.dumps(skill_headers, ensure_ascii=False, indent=2)
-    return (
-        "# Supervisor Skill Selector\n\n"
-        "你正在做 bootstrap 阶段的 supervisor skill 选择。\n"
-        "这一步只允许查看 supervisor skill 的 YAML 头摘要，不允许直接假设 skill 全文内容。\n\n"
-        "## 当前用户 query\n"
-        f"{query}\n\n"
-        "## 可用的 supervisor skill YAML 头摘要\n"
-        f"{headers_json}\n\n"
-        "## 任务\n"
-        "从给定 skill 里挑出真正与当前 query 直接相关的 supervisor skill id。"
-        "如果没有命中，就返回空数组。\n\n"
-        "## 输出要求\n"
-        "你必须返回纯 JSON 对象，且能被 json.loads 直接解析。\n"
-        "返回字段：\n"
-        '- "skill_ids": list[str]\n'
-        '- "reasoning": str\n\n'
-        "规则：\n"
-        "- 只根据 query 与 YAML 头字段判断，不要臆造 skill 全文。\n"
-        "- 允许命中多个 skill，但不要为求稳把所有 skill 都选上。\n"
-        "- 如果 query 只是普通本地问题且不需要额外 supervisor 指南，就返回空数组。\n"
-    )
-
-
-def _build_bootstrap_task_profile(
-    *,
-    model: ChatOpenAI,
-    query: str,
-    supervisor_skill_context: str,
-) -> tuple[BootstrapTaskProfile, str]:
-    profiler = model.with_structured_output(BootstrapTaskProfile, include_raw=True)
-    prompt = _build_bootstrap_task_profile_prompt(
-        query=query,
-        supervisor_skill_context=supervisor_skill_context,
-    )
-    try:
-        result = profiler.invoke(prompt)
-    except Exception as exc:
-        return BootstrapTaskProfile(), _format_planner_error(exc)
-
-    parsed = result.get("parsed")
-    if parsed is not None:
-        return parsed, ""
-
-    raw = result.get("raw")
-    try:
-        content = getattr(raw, "content", None) or ""
-        payload = json.loads(content) if isinstance(content, str) else content
-        if isinstance(payload, dict):
-            return BootstrapTaskProfile(**payload), ""
-    except Exception:
-        pass
-
-    return BootstrapTaskProfile(), _format_planner_error(result.get("parsing_error") or Exception("bootstrap_task_profile_parsing_failed"))
-
-
-def _build_bootstrap_task_profile_prompt(*, query: str, supervisor_skill_context: str) -> str:
-    return (
-        "# Bootstrap Task Profiler\n\n"
-        "你正在做最终 supervisor 启动前的 bootstrap 阶段任务理解。\n\n"
-        "## 当前用户 query\n"
-        f"{query}\n\n"
-        "## 已命中的 supervisor skills 全文\n"
-        f"{supervisor_skill_context.strip() or '无'}\n\n"
-        "## 任务\n"
-        "基于 query 与已命中的 supervisor skills，总结本轮任务目标、约束、预期产物以及自然拆分维度。"
-        "这份结果会同时提供给后续 worker planner 与最终 supervisor。\n\n"
-        "## 输出要求\n"
-        "你必须返回纯 JSON 对象，且能被 json.loads 直接解析。\n"
-        "返回字段：\n"
-        '- "objective": str\n'
-        '- "constraints": list[str]\n'
-        '- "expected_deliverables": list[str]\n'
-        '- "decomposition_axes": list[str]\n'
-        '- "reasoning": str\n'
-    )
-
-
 def _render_bootstrap_task_context(profile: BootstrapTaskProfile) -> str:
     chunks: list[str] = []
     if profile.objective.strip():
@@ -425,6 +435,37 @@ def _render_bootstrap_task_context(profile: BootstrapTaskProfile) -> str:
     if profile.reasoning.strip():
         chunks.append(f"- 执行路径理解：{profile.reasoning.strip()}")
     return "\n".join(chunks).strip()
+
+
+def _render_bootstrap_skill_reasoning_context(selected_skills_reasoning_by_id: dict[str, str]) -> str:
+    chunks: list[str] = []
+    for skill_id, reason in selected_skills_reasoning_by_id.items():
+        normalized_reason = str(reason).strip()
+        if normalized_reason:
+            chunks.append(f"- {skill_id}: {normalized_reason}")
+    return "\n".join(chunks).strip()
+
+
+def _render_bootstrap_action_list_context(bootstrap_todos: list[dict[str, Any]]) -> str:
+    chunks: list[str] = []
+    for index, todo in enumerate(bootstrap_todos, start=1):
+        label = str(todo.get("label", "")).strip()
+        if not label:
+            continue
+        status = _map_bootstrap_todo_status(str(todo.get("status", "pending")).strip())
+        chunks.append(f"{index}. [{status}] {label}")
+    return "\n".join(chunks).strip()
+
+
+def _map_bootstrap_todo_status(status: str) -> str:
+    normalized = status.lower()
+    if normalized in {"completed", "done"}:
+        return "done"
+    if normalized in {"in_progress", "running"}:
+        return "running"
+    if normalized == "blocked":
+        return "blocked"
+    return "pending"
 
 
 def _try_recover_worker_plan(result: dict[str, Any]) -> RuntimeWorkerPlan | None:

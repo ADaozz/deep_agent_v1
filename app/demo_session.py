@@ -9,9 +9,10 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
 
-from app.agent import build_agent_bundle
+from app.agent import build_agent_bundle, build_bootstrap_agent
 from app.config import Settings
 from app.logging_utils import short_text
+from app.skill_store import list_supervisor_skill_headers, normalize_supervisor_skill_ids
 from app.workspace_files import build_workspace_file_card
 from langgraph.types import Overwrite
 
@@ -119,6 +120,7 @@ class DemoRunCollector:
         self.log_file = log_file
         self._file = open(log_file, "a", encoding="utf-8")
         self.main_text: list[str] = []
+        self.bootstrap_todos: list[dict[str, str]] = []
         self.main_todos: list[dict[str, str]] = []
         self.logs: list[dict[str, str]] = []
         self.rounds: list[RoundPanel] = []
@@ -136,6 +138,9 @@ class DemoRunCollector:
         self.runtime_catalog_by_id: dict[str, dict[str, str]] = {item["id"]: item for item in catalog}
         self.generated_runtime_catalog: list[dict[str, str]] = []
         self.loaded_skills: list[dict[str, Any]] = []
+        self.bootstrap_context: dict[str, Any] = {}
+        self.bootstrap_mode = False
+        self.capture_main_text = True
         self.roster_generated = False
         self.agents: dict[str, AgentPanel] = {}
         self.files: dict[str, PublishedFile] = {}
@@ -331,7 +336,10 @@ class DemoRunCollector:
                     if agent_id:
                         self.agents[agent_id].todo_list = todos
                 else:
-                    self.main_todos = todos
+                    if self.bootstrap_mode:
+                        self.bootstrap_todos = todos
+                    else:
+                        self.main_todos = todos
             if tool_name == "write_evidence_todos":
                 todos = _parse_evidence_todos_from_tool_output(content)
                 if ns and ns[0].startswith("tools:"):
@@ -355,7 +363,7 @@ class DemoRunCollector:
         content = getattr(token, "content", None)
         if content:
             self._capture_guard_text(ns, content)
-            if not ns:
+            if not ns and self.capture_main_text:
                 self.main_text.append(content)
 
     def _capture_main_tool_calls(self, node_data: dict[str, Any]) -> None:
@@ -460,14 +468,19 @@ class DemoRunCollector:
 
             tool_name = getattr(msg, "name", "unknown")
             if not ns and tool_name == "write_todos":
-                self.main_todos = _parse_todos_from_tool_output(getattr(msg, "content", ""))
-                self._push_log("scheduler", "supervisor 更新了原子任务列表。")
+                parsed_todos = _parse_todos_from_tool_output(getattr(msg, "content", ""))
+                if self.bootstrap_mode:
+                    self.bootstrap_todos = parsed_todos
+                    self._push_log("scheduler", "bootstrap supervisor 更新了第一版 Action List。")
+                else:
+                    self.main_todos = parsed_todos
+                    self._push_log("scheduler", "supervisor 更新了原子任务列表。")
                 self._write_event(
-                    "main_todos_updated",
+                    "bootstrap_todos_updated" if self.bootstrap_mode else "main_todos_updated",
                     source="scheduler",
-                    todo_count=len(self.main_todos),
-                    todo_status_counts=_status_counts(self.main_todos),
-                    todo_titles=[todo.get("label", "") for todo in self.main_todos],
+                    todo_count=len(parsed_todos),
+                    todo_status_counts=_status_counts(parsed_todos),
+                    todo_titles=[todo.get("label", "") for todo in parsed_todos],
                 )
                 continue
 
@@ -497,6 +510,26 @@ class DemoRunCollector:
                         planner_error=roster["planner_error"],
                         workers=roster["workers"],
                         task_breakdown=roster["task_breakdown"],
+                    )
+                continue
+
+            if not ns and tool_name == "record_bootstrap_context":
+                context = _parse_bootstrap_context_from_tool_output(getattr(msg, "content", ""))
+                if context:
+                    self.bootstrap_context = context
+                    selected_skill_ids = normalize_supervisor_skill_ids(context.get("selected_skill_ids") or [])
+                    self.loaded_skills = [
+                        header for header in list_supervisor_skill_headers() if header["id"] in set(selected_skill_ids)
+                    ]
+                    self._push_log(
+                        "scheduler",
+                        "bootstrap supervisor 已记录任务理解与技能选择结果。",
+                    )
+                    self._write_event(
+                        "bootstrap_context_recorded",
+                        source="scheduler",
+                        selected_skill_ids=selected_skill_ids,
+                        objective=str(context.get("objective") or "").strip(),
                     )
                 continue
 
@@ -976,12 +1009,25 @@ def run_demo_session(
 ) -> dict[str, Any]:
     os.makedirs(os.path.dirname(settings.log_file) or ".", exist_ok=True)
     effective_query = (agent_query or query).strip()
-    agent, runtime_catalog, _bootstrap_meta = build_agent_bundle(settings=settings, query=effective_query)
-    collector = DemoRunCollector(log_file=settings.log_file, runtime_catalog=runtime_catalog)
+    collector = DemoRunCollector(log_file=settings.log_file, runtime_catalog=[])
     collector.status = "running"
     collector.log_session_start(query=query, max_rounds=max_rounds, model=settings.model, mode="sync")
     message_payload = messages or [{"role": "user", "content": effective_query}]
     try:
+        bootstrap_meta = _run_bootstrap_phase(
+            settings=settings,
+            effective_query=effective_query,
+            message_payload=message_payload,
+            collector=collector,
+        )
+        agent, runtime_catalog, bootstrap_meta = build_agent_bundle(
+            settings=settings,
+            query=effective_query,
+            bootstrap_meta=bootstrap_meta,
+        )
+        collector.runtime_catalog = list(runtime_catalog)
+        collector.runtime_catalog_by_id = {item["id"]: item for item in runtime_catalog}
+        collector.loaded_skills = list(bootstrap_meta.get("selected_skill_headers") or collector.loaded_skills)
         for chunk in agent.stream(
             {"messages": message_payload},
             stream_mode=["updates", "messages", "custom"],
@@ -1035,23 +1081,63 @@ def run_demo_session_stream(
         if first_event:
             yield first_event
 
-        bootstrap_logs = [
-            "正在加载配置、提示词与会话上下文。",
-            "正在披露 supervisor skill YAML 头并选择命中 skill。",
-            "正在基于命中的 supervisor skill 准备运行时 worker 名册与调度规则。",
-            "正在构建 supervisor、工具链与执行后端。",
-        ]
-        for message in bootstrap_logs:
-            collector._push_log("scheduler", message)
-            bootstrap_payload = collector.build_payload(query=query, max_rounds=max_rounds, final=False)
-            bootstrap_event = emit(bootstrap_payload, "snapshot")
-            if bootstrap_event:
-                yield bootstrap_event
+        collector._push_log("scheduler", "正在启动 bootstrap supervisor，先生成第一版 Action List、技能选择和任务理解。")
+        bootstrap_payload = collector.build_payload(query=query, max_rounds=max_rounds, final=False)
+        bootstrap_event = emit(bootstrap_payload, "snapshot")
+        if bootstrap_event:
+            yield bootstrap_event
 
-        agent, runtime_catalog, bootstrap_meta = build_agent_bundle(settings=settings, query=effective_query)
+        bootstrap_agent, _ = build_bootstrap_agent(settings=settings, query=effective_query)
+        collector.bootstrap_mode = True
+        collector.capture_main_text = False
+        try:
+            for chunk in bootstrap_agent.stream(
+                {"messages": message_payload},
+                stream_mode=["updates", "messages", "custom"],
+                subgraphs=True,
+                version="v2",
+            ):
+                collector.handle(chunk)
+                snapshot = collector.build_payload(query=query, max_rounds=max_rounds, final=False)
+                event = emit(snapshot, "snapshot")
+                if event:
+                    yield event
+        finally:
+            collector.bootstrap_mode = False
+            collector.capture_main_text = True
+
+        bootstrap_meta = {
+            "selected_skill_ids": (collector.bootstrap_context or {}).get("selected_skill_ids") or [],
+            "selected_skill_headers": list(collector.loaded_skills or []),
+            "selected_skills_reasoning_by_id": (collector.bootstrap_context or {}).get("selected_skills_reasoning_by_id")
+            or {},
+            "skill_selection_reasoning": str((collector.bootstrap_context or {}).get("reasoning") or "").strip(),
+            "skill_selection_error": "",
+            "bootstrap_todos": list(collector.bootstrap_todos or []),
+            "bootstrap_task_profile": {
+                "objective": str((collector.bootstrap_context or {}).get("objective") or "").strip(),
+                "constraints": (collector.bootstrap_context or {}).get("constraints") or [],
+                "expected_deliverables": (collector.bootstrap_context or {}).get("expected_deliverables") or [],
+                "decomposition_axes": (collector.bootstrap_context or {}).get("decomposition_axes") or [],
+                "reasoning": str((collector.bootstrap_context or {}).get("reasoning") or "").strip(),
+            },
+            "bootstrap_task_error": "",
+        }
+
+        collector._push_log("scheduler", "正在基于 bootstrap 结果构建最终 supervisor、动态 worker 名册与运行时工具。")
+        bootstrap_payload = collector.build_payload(query=query, max_rounds=max_rounds, final=False)
+        bootstrap_event = emit(bootstrap_payload, "snapshot")
+        if bootstrap_event:
+            yield bootstrap_event
+
+        agent, runtime_catalog, bootstrap_meta = build_agent_bundle(
+            settings=settings,
+            query=effective_query,
+            bootstrap_meta=bootstrap_meta,
+        )
         collector.runtime_catalog = list(runtime_catalog)
         collector.runtime_catalog_by_id = {item["id"]: item for item in runtime_catalog}
-        collector.loaded_skills = list(bootstrap_meta.get("selected_skill_headers") or [])
+        collector.loaded_skills = list(bootstrap_meta.get("selected_skill_headers") or collector.loaded_skills)
         selected_skill_ids = bootstrap_meta.get("selected_skill_ids") or []
         if selected_skill_ids:
             collector._push_log(
@@ -1119,6 +1205,48 @@ def run_demo_session_stream(
         yield {"type": "done", "payload": final_payload}
     finally:
         collector.close()
+
+
+def _run_bootstrap_phase(
+    *,
+    settings: Settings,
+    effective_query: str,
+    message_payload: list[dict[str, str]],
+    collector: DemoRunCollector,
+) -> dict[str, Any]:
+    collector._push_log("scheduler", "正在启动 bootstrap supervisor，先生成第一版 Action List、技能选择和任务理解。")
+    bootstrap_agent, _ = build_bootstrap_agent(settings=settings, query=effective_query)
+    collector.bootstrap_mode = True
+    collector.capture_main_text = False
+    try:
+        for chunk in bootstrap_agent.stream(
+            {"messages": message_payload},
+            stream_mode=["updates", "messages", "custom"],
+            subgraphs=True,
+            version="v2",
+        ):
+            collector.handle(chunk)
+    finally:
+        collector.bootstrap_mode = False
+        collector.capture_main_text = True
+
+    context = dict(collector.bootstrap_context or {})
+    return {
+        "selected_skill_ids": context.get("selected_skill_ids") or [],
+        "selected_skill_headers": list(collector.loaded_skills or []),
+        "selected_skills_reasoning_by_id": context.get("selected_skills_reasoning_by_id") or {},
+        "skill_selection_reasoning": str(context.get("reasoning") or "").strip(),
+        "skill_selection_error": "",
+        "bootstrap_todos": list(collector.bootstrap_todos or []),
+        "bootstrap_task_profile": {
+            "objective": str(context.get("objective") or "").strip(),
+            "constraints": context.get("constraints") or [],
+            "expected_deliverables": context.get("expected_deliverables") or [],
+            "decomposition_axes": context.get("decomposition_axes") or [],
+            "reasoning": str(context.get("reasoning") or "").strip(),
+        },
+        "bootstrap_task_error": "",
+    }
 
 
 def _build_fallback_summary_from_worker_reports(collector: DemoRunCollector, exc: Exception) -> str:
@@ -1277,6 +1405,38 @@ def _parse_subagent_roster_from_tool_output(content: Any) -> dict[str, Any] | No
         "planner_error": str(payload.get("planner_error", "")).strip(),
         "task_breakdown": str(payload.get("task_breakdown", "")).strip(),
         "workers": parsed_workers,
+    }
+
+
+def _parse_bootstrap_context_from_tool_output(content: Any) -> dict[str, Any] | None:
+    text = _extract_structured_block(str(content))
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            payload = ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            return None
+    if not isinstance(payload, dict):
+        return None
+    return {
+        "selected_skill_ids": normalize_supervisor_skill_ids(payload.get("selected_skill_ids") or []),
+        "selected_skills_reasoning_by_id": {
+            str(skill_id).strip(): str(reason).strip()
+            for skill_id, reason in (payload.get("selected_skills_reasoning_by_id") or {}).items()
+            if str(skill_id).strip() and str(reason).strip()
+        },
+        "objective": str(payload.get("objective", "")).strip(),
+        "constraints": [str(item).strip() for item in payload.get("constraints") or [] if str(item).strip()],
+        "expected_deliverables": [
+            str(item).strip() for item in payload.get("expected_deliverables") or [] if str(item).strip()
+        ],
+        "decomposition_axes": [
+            str(item).strip() for item in payload.get("decomposition_axes") or [] if str(item).strip()
+        ],
+        "reasoning": str(payload.get("reasoning", "")).strip(),
     }
 
 

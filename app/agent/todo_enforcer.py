@@ -69,6 +69,10 @@ class WriteEvidenceTodosInput(BaseModel):
     )
 
 
+EvidenceTodoItem.model_rebuild()
+WriteEvidenceTodosInput.model_rebuild()
+
+
 def _normalize_todos(todos: list[EvidenceTodoItem | dict[str, Any]]) -> list[EvidenceTodo]:
     normalized: list[EvidenceTodo] = []
     for item in todos:

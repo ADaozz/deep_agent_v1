@@ -20,6 +20,9 @@ class InspectSupervisorSkillsInput(BaseModel):
     )
 
 
+InspectSupervisorSkillsInput.model_rebuild()
+
+
 def make_inspect_supervisor_skills_tool():
     @tool("inspect_supervisor_skills", args_schema=InspectSupervisorSkillsInput)
     def inspect_supervisor_skills(mode: str = "headers", skill_ids: list[str] | None = None) -> str:

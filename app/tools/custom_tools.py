@@ -3,8 +3,12 @@ from __future__ import annotations
 import glob
 import json
 import shlex
+import smtplib
 from functools import lru_cache
+from email.message import EmailMessage
 from pathlib import Path
+import mimetypes
+import re
 
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
@@ -15,6 +19,7 @@ from app.config import PROJECT_ROOT, env_bool, env_int, env_str
 
 CUSTOM_TOOL_METADATA = {
     "resolve_cmdb_service_context": {"scope": "shared"},
+    "send_email_with_attachment": {"scope": "supervisor"},
     "tavily_search": {"scope": "worker"},
     "ssh_execute": {"scope": "worker"},
 }
@@ -84,6 +89,7 @@ def _format_tavily_failure(query: str, failures: list[str]) -> str:
 CMDB_ROOT = PROJECT_ROOT / "sys_cmdb"
 CMDB_MARKDOWN = CMDB_ROOT / "CMDB.md"
 DEPLOYMENT_MAP_ROOT = CMDB_ROOT / "deployment_map"
+WORKSPACE_ROOT = PROJECT_ROOT / "workspace"
 
 
 class RelatedService(BaseModel):
@@ -115,6 +121,59 @@ def _make_internal_llm() -> ChatOpenAI:
     if base_url:
         kwargs["base_url"] = base_url
     return ChatOpenAI(**kwargs)
+
+
+def _mail_settings() -> dict[str, object]:
+    smtp_host = env_str("DEEP_AGENT_MAIL_SMTP_HOST", "smtp.163.com").strip() or "smtp.163.com"
+    smtp_port = env_int("DEEP_AGENT_MAIL_SMTP_PORT", 465)
+    smtp_user = env_str("DEEP_AGENT_MAIL_SMTP_USER").strip()
+    smtp_password = env_str("DEEP_AGENT_MAIL_SMTP_PASSWORD").strip()
+    from_name = env_str("DEEP_AGENT_MAIL_FROM_NAME", "Deep Agent").strip() or "Deep Agent"
+    subject = env_str("DEEP_AGENT_MAIL_SUBJECT", "Deep Agent Notification").strip() or "Deep Agent Notification"
+    return {
+        "smtp_host": smtp_host,
+        "smtp_port": smtp_port,
+        "smtp_user": smtp_user,
+        "smtp_password": smtp_password,
+        "from_name": from_name,
+        "subject": subject,
+    }
+
+
+def _resolve_mail_attachment_path(attachment_path: str) -> Path:
+    raw_path = attachment_path.strip()
+    if not raw_path:
+        raise ValueError("缺少 attachment_path。")
+    path = Path(raw_path)
+    candidate = path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+    if not candidate.exists() or not candidate.is_file():
+        raise FileNotFoundError(f"附件不存在: {raw_path}")
+    try:
+        candidate.relative_to(PROJECT_ROOT)
+    except ValueError as exc:
+        raise ValueError("附件路径必须位于项目目录内。") from exc
+    return candidate
+
+
+def _html_to_plain_text(html_body: str) -> str:
+    text = re.sub(r"<\s*br\s*/?\s*>", "\n", html_body, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip() or "请查看 HTML 正文。"
+
+
+def _attach_file(message: EmailMessage, attachment_file: Path) -> None:
+    mime_type, _encoding = mimetypes.guess_type(attachment_file.name)
+    if mime_type:
+        maintype, subtype = mime_type.split("/", 1)
+    else:
+        maintype, subtype = "application", "octet-stream"
+    message.add_attachment(
+        attachment_file.read_bytes(),
+        maintype=maintype,
+        subtype=subtype,
+        filename=attachment_file.name,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -464,3 +523,75 @@ def ssh_execute(host_ip: str, command: str) -> str:
         f"exit_code: {exit_code}\n"
         f"output:\n{output}"
     )
+
+
+@tool
+def send_email_with_attachment(target_email: str, html_body: str, attachment_path: str) -> str:
+    """向目标邮箱发送 HTML 邮件，并附带一个项目目录内的附件。
+
+    何时使用：
+    - supervisor 已生成报告、结论或文件，需要通过邮件发送给指定收件人。
+    - 用户明确要求邮件通知或邮件投递。
+
+    使用边界：
+    - 只接受一个目标邮箱、HTML 正文和一个附件路径。
+    - 附件路径优先使用项目根目录内的相对路径，例如 `result/report.md` 或 `workspace/report.md`。
+    - 不要传目录路径；只允许传单个已存在文件。
+
+    推荐邮件模板（中文正式通用版）：
+    - 标题模板：`【情况说明/结果通知】{主题关键词}`
+    - HTML 正文模板：
+      `<p>尊敬的同事/老师/负责人，您好：</p>`
+      `<p>现将 <strong>{事项名称}</strong> 的处理结果同步如下：</p>`
+      `<ul>`
+      `<li><strong>背景</strong>：{一句话说明背景}</li>`
+      `<li><strong>结论</strong>：{一句话说明结论}</li>`
+      `<li><strong>附件说明</strong>：详见随附文件 {附件名称}</li>`
+      `</ul>`
+      `<p>如需我继续跟进，请直接回复此邮件。</p>`
+      `<p>此致<br/>敬礼</p>`
+      `<p>{署名}</p>`
+
+    写作要求：
+    - 标题保持正式、简洁、可检索，避免口语化表达。
+    - 正文先交代背景，再给结论，最后说明附件和后续动作。
+    - 附件是主要信息载体时，正文只做摘要，不要重复整份报告。
+
+    返回：
+    - JSON 字符串，包含 recipient、subject、attachment_path 和 status。
+    """
+    recipient = target_email.strip()
+    if not recipient:
+        return "send_email_with_attachment 失败：缺少 target_email。"
+    if not html_body.strip():
+        return "send_email_with_attachment 失败：缺少 html_body。"
+
+    try:
+        settings = _mail_settings()
+        smtp_user = str(settings["smtp_user"]).strip()
+        smtp_password = str(settings["smtp_password"]).strip()
+        if not smtp_user or not smtp_password:
+            return "send_email_with_attachment 失败：邮件凭据未配置，请检查 .env 中的 DEEP_AGENT_MAIL_* 配置。"
+        attachment_file = _resolve_mail_attachment_path(attachment_path)
+        message = EmailMessage()
+        message["From"] = f'{settings["from_name"]} <{smtp_user}>'
+        message["To"] = recipient
+        message["Subject"] = str(settings["subject"])
+        message.set_content(_html_to_plain_text(html_body))
+        message.add_alternative(html_body, subtype="html")
+        _attach_file(message, attachment_file)
+
+        with smtplib.SMTP_SSL(str(settings["smtp_host"]), int(settings["smtp_port"])) as smtp:
+            smtp.login(smtp_user, smtp_password)
+            smtp.send_message(message)
+    except Exception as exc:  # noqa: BLE001
+        return f"send_email_with_attachment 失败：{type(exc).__name__}: {exc}"
+
+    payload = {
+        "status": "sent",
+        "recipient": recipient,
+        "subject": str(settings["subject"]),
+        "attachment_path": attachment_file.relative_to(PROJECT_ROOT).as_posix(),
+        "sender": smtp_user,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
