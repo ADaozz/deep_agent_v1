@@ -28,6 +28,9 @@ async function requestJson(config) {
 }
 
 export const demoApi = {
+  checkHealth() {
+    return requestJson({ url: "/api/health", method: "GET" });
+  },
   fetchMeta() {
     return requestJson({ url: "/api/demo/meta", method: "GET" });
   },
@@ -82,6 +85,16 @@ export const demoApi = {
   },
   fetchTools() {
     return requestJson({ url: "/api/demo/tools", method: "GET" });
+  },
+  fetchEnv() {
+    return requestJson({ url: "/api/demo/env", method: "GET" });
+  },
+  saveEnv(values) {
+    return requestJson({
+      url: "/api/demo/env",
+      method: "POST",
+      data: { values },
+    });
   },
   fetchHeartbeats(taskId = "") {
     return requestJson({

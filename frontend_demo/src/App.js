@@ -37,6 +37,7 @@ import { useArtifacts } from "./composables/useArtifacts.js";
 import { useCenters } from "./composables/useCenters.js";
 import { useSessionRuntime } from "./composables/useSessionRuntime.js";
 import { usePersistence } from "./composables/usePersistence.js";
+import { demoApi } from "./api.js";
 
 export default {
   name: "App",
@@ -69,6 +70,14 @@ export default {
     const demoState = ref(cloneBaseState());
     const history = ref([]);
     const error = ref("");
+    const backendConnected = ref(null);
+    const showSettingsModal = ref(false);
+    const envVariables = ref([]);
+    const envLoading = ref(false);
+    const envSaving = ref(false);
+    const envError = ref("");
+    const envSaveFeedback = ref("");
+    let healthTimer = null;
 
     const uploads = useUploads({ threadId, loading });
     const centers = useCenters({
@@ -102,13 +111,28 @@ export default {
     onMounted(() => {
       void centers.loadMeta();
       void centers.loadHistory();
+      void checkBackendHealth();
+      healthTimer = window.setInterval(checkBackendHealth, 5000);
     });
 
     onBeforeUnmount(() => {
+      if (healthTimer) {
+        window.clearInterval(healthTimer);
+        healthTimer = null;
+      }
       persistence.disposePersistence();
       runtime.disposeRuntime();
       uploads.disposeUploads();
     });
+
+    async function checkBackendHealth() {
+      try {
+        const payload = await demoApi.checkHealth();
+        backendConnected.value = Boolean(payload?.ok);
+      } catch {
+        backendConnected.value = false;
+      }
+    }
 
     function setUiState(patch) {
       uiState.value = normalizeUiState({ ...uiState.value, ...patch });
@@ -132,6 +156,17 @@ export default {
 
     function closeHeartbeatModal() {
       centers.closeHeartbeatModal();
+    }
+
+    function openSettingsModal() {
+      showSettingsModal.value = true;
+      void loadEnvSettings();
+    }
+
+    function closeSettingsModal() {
+      showSettingsModal.value = false;
+      envError.value = "";
+      envSaveFeedback.value = "";
     }
 
     function closeHistoryModal() {
@@ -174,7 +209,70 @@ export default {
       runtime.setQuery(value);
     }
 
+    async function loadEnvSettings() {
+      envLoading.value = true;
+      envError.value = "";
+      try {
+        const payload = await demoApi.fetchEnv();
+        envVariables.value = Array.isArray(payload.variables) ? payload.variables : [];
+      } catch (exc) {
+        envError.value = exc?.message || "环境变量加载失败";
+      } finally {
+        envLoading.value = false;
+      }
+    }
+
+    function updateEnvValue(name, value) {
+      envVariables.value = envVariables.value.map((item) =>
+        item.name === name ? { ...item, value } : item
+      );
+      envSaveFeedback.value = "";
+    }
+
+    async function saveEnvSettings() {
+      envSaving.value = true;
+      envError.value = "";
+      envSaveFeedback.value = "";
+      try {
+        const values = {};
+        for (const item of envVariables.value) {
+          values[item.name] = item.value || "";
+        }
+        const payload = await demoApi.saveEnv(values);
+        envVariables.value = Array.isArray(payload.variables) ? payload.variables : envVariables.value;
+        envSaveFeedback.value = "环境变量已保存";
+        void centers.loadMeta();
+      } catch (exc) {
+        envError.value = exc?.message || "环境变量保存失败";
+      } finally {
+        envSaving.value = false;
+      }
+    }
+
     const interactionLocked = computed(() => loading.value);
+    const envVariableGroups = computed(() => {
+      const groups = [];
+      const indexByName = new Map();
+      for (const item of envVariables.value) {
+        const groupName = item.group || "Other";
+        if (!indexByName.has(groupName)) {
+          indexByName.set(groupName, groups.length);
+          groups.push({ name: groupName, variables: [] });
+        }
+        groups[indexByName.get(groupName)].variables.push(item);
+      }
+      return groups;
+    });
+    const backendBadgeClass = computed(() => {
+      if (backendConnected.value === true) return "is-connected";
+      if (backendConnected.value === false) return "is-disconnected";
+      return "is-checking";
+    });
+    const backendBadgeTitle = computed(() => {
+      if (backendConnected.value === true) return "后端已连通";
+      if (backendConnected.value === false) return "后端未连通";
+      return "正在检查后端连通状态";
+    });
 
     return {
       activeArtifact: artifacts.activeArtifact,
@@ -189,10 +287,13 @@ export default {
       closeDeleteConfirm,
       closeHistoryModal,
       closeHeartbeatModal,
+      closeSettingsModal,
       closePromptModal,
       closeSkillModal,
       closeToolModal,
       completedCount: runtime.completedCount,
+      backendBadgeClass,
+      backendBadgeTitle,
       deleteConfirm: centers.deleteConfirm,
       deletingThreadId: centers.deletingThreadId,
       deletingHeartbeatTaskId: centers.deletingHeartbeatTaskId,
@@ -229,6 +330,12 @@ export default {
       heartbeatLoading: centers.heartbeatLoading,
       heartbeatError: centers.heartbeatError,
       heartbeatTogglingId: centers.heartbeatTogglingId,
+      envError,
+      envLoading,
+      envSaveFeedback,
+      envSaving,
+      envVariables,
+      envVariableGroups,
       icons,
       interactionLocked,
       isEditableArtifact: artifacts.isEditableArtifact,
@@ -241,6 +348,7 @@ export default {
       openHistoryCenter: centers.openHistoryCenter,
       openHeartbeatCenter: centers.openHeartbeatCenter,
       openPromptCenter: centers.openPromptCenter,
+      openSettingsModal,
       openSkillCenter: centers.openSkillCenter,
       openToolCenter: centers.openToolCenter,
       pendingUploadTone,
@@ -258,6 +366,7 @@ export default {
       selectSkill,
       selectTool,
       selectedAgent: runtime.selectedAgent,
+      saveEnvSettings,
       setQuery,
       setTheme,
       skillError: centers.skillError,
@@ -266,6 +375,7 @@ export default {
       skillSaveFeedback: centers.skillSaveFeedback,
       skillSaveFeedbackTone: centers.skillSaveFeedbackTone,
       skillSaving: centers.skillSaving,
+      showSettingsModal,
       skillSections: centers.skillSections,
       statusClass,
       stepLabel,
@@ -280,6 +390,7 @@ export default {
       uiState,
       updatePromptDraft: centers.updatePromptDraft,
       updateSkillDraft: centers.updateSkillDraft,
+      updateEnvValue,
       uploadError: uploads.uploadError,
       workerCount: runtime.workerCount,
       activeSession: runtime.activeSession,
@@ -312,11 +423,17 @@ export default {
             <span>智能心跳</span>
           </button>
         </div>
+        <div class="side-rail-card side-rail-bottom">
+          <button type="button" :class="['side-menu-button', showSettingsModal ? 'is-active' : '']" title="配置环境变量" @click="openSettingsModal">
+            <component :is="icons.Settings" class="h-4 w-4" />
+            <span>设置</span>
+          </button>
+        </div>
       </aside>
       <div class="dialog-shell">
         <header class="dialog-header">
           <div>
-            <div class="app-badge">
+            <div :class="['app-badge', backendBadgeClass]" :title="backendBadgeTitle">
               <component :is="icons.TerminalSquare" class="h-4 w-4" />
               <span>Supervisor Agent Console</span>
             </div>
@@ -509,6 +626,53 @@ export default {
           @select-thread="handleSelectThread"
           @delete-thread="openDeleteConfirm"
         />
+      </Modal>
+
+      <Modal :open="showSettingsModal" title="环境变量配置" eyebrow="Settings" variant="env-center" @close="closeSettingsModal">
+        <div class="env-settings-panel">
+          <div v-if="envError" class="alert-block">{{ envError }}</div>
+          <div v-if="envSaveFeedback" class="success-block">{{ envSaveFeedback }}</div>
+          <div v-if="envLoading && !envVariables.length" class="empty-block">正在加载环境变量。</div>
+          <div v-else class="env-group-stack">
+            <section v-for="group in envVariableGroups" :key="group.name" class="env-group">
+              <div class="message-section-title">
+                <div class="message-section-heading">
+                  <component :is="icons.Settings" class="h-4 w-4" />
+                  <span>{{ group.name }}</span>
+                </div>
+                <span class="message-section-meta">{{ group.variables.length }} item(s)</span>
+              </div>
+              <div class="env-grid">
+                <label v-for="variable in group.variables" :key="variable.name" class="form-field env-field">
+                  <div class="form-label">{{ variable.label || variable.name }}</div>
+                  <input
+                    :type="variable.secret ? 'password' : 'text'"
+                    class="field-control"
+                    :value="variable.value"
+                    :placeholder="variable.name"
+                    :disabled="envSaving"
+                    autocomplete="off"
+                    spellcheck="false"
+                    @input="updateEnvValue(variable.name, $event.target.value)"
+                  />
+                  <div class="form-feedback">
+                    {{ variable.name }} · {{ variable.from_env_file ? '.env' : variable.from_process ? 'process only' : 'unset' }}
+                  </div>
+                </label>
+              </div>
+            </section>
+          </div>
+          <div class="prompt-toolbar env-toolbar">
+            <span class="prompt-toolbar-note">留空并保存会从 .env 和当前服务进程中移除该变量。</span>
+            <div class="prompt-toolbar-actions">
+              <button type="button" class="secondary-button" :disabled="envSaving" @click="closeSettingsModal">取消</button>
+              <button type="button" class="primary-button" :disabled="envSaving || envLoading" @click="saveEnvSettings">
+                <component :is="envSaving ? icons.LoaderCircle : icons.CheckCircle2" class="h-4 w-4" :class="{ 'animate-spin': envSaving }" />
+                <span>{{ envSaving ? '保存中' : '保存配置' }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
       </Modal>
 
       <Modal

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import mimetypes
+import os
 import re
 from datetime import datetime
 from email.parser import BytesParser
@@ -11,6 +12,8 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+from dotenv import dotenv_values, set_key, unset_key
 
 from app.backends import validate_docker_backend_access
 from app.chat_history_store import (
@@ -49,12 +52,49 @@ from app.workspace_files import WORKSPACE_ROOT, build_workspace_file_card, resol
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ENV_FILE = PROJECT_ROOT / ".env"
 FRONTEND_SOURCE_ROOT = PROJECT_ROOT / "frontend_demo"
 FRONTEND_DIST_ROOT = FRONTEND_SOURCE_ROOT / "dist"
 FRONTEND_ROOT = FRONTEND_DIST_ROOT if FRONTEND_DIST_ROOT.exists() else FRONTEND_SOURCE_ROOT
 ALLOWED_USER_FILE_EXTENSIONS = {".md", ".xlsx", ".csv", ".txt", ".py"}
 MAX_USER_FILE_SIZE = 10 * 1024
 MAX_USER_FILE_COUNT = 3
+ENV_VARIABLE_DEFINITIONS = [
+    {"name": "DASHSCOPE_API_KEY", "label": "DashScope API Key", "group": "Model", "secret": True},
+    {"name": "DASHSCOPE_BASE_URL", "label": "DashScope Base URL", "group": "Model", "secret": False},
+    {"name": "DASHSCOPE_MODEL", "label": "DashScope Model", "group": "Model", "secret": False},
+    {"name": "DEEP_AGENT_MODEL_TIMEOUT", "label": "Model Timeout", "group": "Runtime", "secret": False},
+    {"name": "DEEP_AGENT_MODEL_MAX_RETRIES", "label": "Model Max Retries", "group": "Runtime", "secret": False},
+    {"name": "DEEP_AGENT_BACKEND", "label": "Backend", "group": "Runtime", "secret": False},
+    {"name": "DEEP_AGENT_DOCKER_CONTAINER", "label": "Docker Container", "group": "Runtime", "secret": False},
+    {"name": "DEEP_AGENT_DOCKER_WORKSPACE", "label": "Docker Workspace", "group": "Runtime", "secret": False},
+    {"name": "DEEP_AGENT_DOCKER_TIMEOUT", "label": "Docker Timeout", "group": "Runtime", "secret": False},
+    {"name": "DEEP_AGENT_HEARTBEAT_ENABLED", "label": "Heartbeat Enabled", "group": "Heartbeat", "secret": False},
+    {"name": "DEEP_AGENT_HEARTBEAT_POLL_INTERVAL", "label": "Heartbeat Poll Interval", "group": "Heartbeat", "secret": False},
+    {"name": "DEEP_AGENT_HEARTBEAT_MAX_ROUNDS", "label": "Heartbeat Max Rounds", "group": "Heartbeat", "secret": False},
+    {"name": "TAVILY_API_KEY_LWT", "label": "Tavily API Key", "group": "Tools", "secret": True},
+    {"name": "TAVILY_API_KEY_LWT_BK", "label": "Tavily Backup API Key", "group": "Tools", "secret": True},
+    {"name": "DEEP_AGENT_SSH_USER", "label": "SSH User", "group": "SSH", "secret": False},
+    {"name": "DEEP_AGENT_SSH_PASSWORD", "label": "SSH Password", "group": "SSH", "secret": True},
+    {"name": "DEEP_AGENT_SSH_KEY_PATH", "label": "SSH Key Path", "group": "SSH", "secret": False},
+    {"name": "DEEP_AGENT_SSH_PORT", "label": "SSH Port", "group": "SSH", "secret": False},
+    {"name": "DEEP_AGENT_SSH_TIMEOUT", "label": "SSH Timeout", "group": "SSH", "secret": False},
+    {"name": "DEEP_AGENT_SSH_CONNECT_TIMEOUT", "label": "SSH Connect Timeout", "group": "SSH", "secret": False},
+    {"name": "DEEP_AGENT_MAIL_SMTP_HOST", "label": "SMTP Host", "group": "Mail", "secret": False},
+    {"name": "DEEP_AGENT_MAIL_SMTP_PORT", "label": "SMTP Port", "group": "Mail", "secret": False},
+    {"name": "DEEP_AGENT_MAIL_SMTP_USER", "label": "SMTP User", "group": "Mail", "secret": False},
+    {"name": "DEEP_AGENT_MAIL_SMTP_PASSWORD", "label": "SMTP Password", "group": "Mail", "secret": True},
+    {"name": "DEEP_AGENT_MAIL_FROM_NAME", "label": "Mail From Name", "group": "Mail", "secret": False},
+    {"name": "DEEP_AGENT_MAIL_SUBJECT", "label": "Mail Subject", "group": "Mail", "secret": False},
+    {"name": "DEEP_AGENT_PG_HOST", "label": "Postgres Host", "group": "Storage", "secret": False},
+    {"name": "DEEP_AGENT_PG_PORT", "label": "Postgres Port", "group": "Storage", "secret": False},
+    {"name": "DEEP_AGENT_PG_USER", "label": "Postgres User", "group": "Storage", "secret": False},
+    {"name": "DEEP_AGENT_PG_PASSWORD", "label": "Postgres Password", "group": "Storage", "secret": True},
+    {"name": "DEEP_AGENT_PG_DATABASE", "label": "Postgres Database", "group": "Storage", "secret": False},
+    {"name": "LOG_LEVEL", "label": "Log Level", "group": "Logging", "secret": False},
+    {"name": "DEEP_AGENT_LOG_FILE", "label": "Log File", "group": "Logging", "secret": False},
+]
+ALLOWED_ENV_NAMES = {item["name"] for item in ENV_VARIABLE_DEFINITIONS}
 
 
 class DemoRequestHandler(SimpleHTTPRequestHandler):
@@ -78,6 +118,9 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
             return
         if self.path == "/api/demo/tools/toggle":
             self._handle_toggle_tool()
+            return
+        if self.path == "/api/demo/env":
+            self._handle_update_env()
             return
         if self.path == "/api/demo/thread-state":
             self._handle_update_thread_state()
@@ -328,6 +371,27 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
 
         self._send_json({"ok": True, "tool": tool_payload, "tools": list_tool_controls()}, status=HTTPStatus.OK)
 
+    def _handle_update_env(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length) if content_length else b"{}"
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self._send_json({"error": "invalid_json"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        values = payload.get("values")
+        if not isinstance(values, dict):
+            self._send_json({"error": "values_must_be_object"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        unknown_names = sorted(str(name) for name in values if str(name) not in ALLOWED_ENV_NAMES)
+        if unknown_names:
+            self._send_json({"error": f"env_not_allowed: {', '.join(unknown_names)}"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        _save_env_values(values)
+        self._send_json({"ok": True, **_build_env_payload()}, status=HTTPStatus.OK)
+
     def _handle_toggle_heartbeat(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
         raw_body = self.rfile.read(content_length) if content_length else b"{}"
@@ -497,6 +561,9 @@ class DemoRequestHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/demo/skills":
             settings = load_settings(argv=[])
             self._send_json({"skills": list_skill_sections(), "model": settings.model})
+            return
+        if self.path == "/api/demo/env":
+            self._send_json(_build_env_payload(), status=HTTPStatus.OK)
             return
         if parsed.path == "/api/demo/tools":
             params = parse_qs(parsed.query)
@@ -1057,6 +1124,40 @@ def _excel_width_to_px(width: float | None) -> int:
 
 def _infer_text_width_px(text: str) -> int:
     return max(72, min(280, 24 + len(text[:24]) * 8))
+
+
+def _build_env_payload() -> dict[str, object]:
+    env_file_values = dotenv_values(ENV_FILE) if ENV_FILE.exists() else {}
+    variables = []
+    for definition in ENV_VARIABLE_DEFINITIONS:
+        name = definition["name"]
+        file_value = env_file_values.get(name)
+        process_value = os.environ.get(name)
+        value = file_value if file_value is not None else process_value
+        variables.append(
+            {
+                **definition,
+                "value": "" if value is None else str(value),
+                "from_env_file": file_value is not None,
+                "from_process": process_value is not None,
+                "process_value": "" if process_value is None else str(process_value),
+            }
+        )
+    return {"env_file": str(ENV_FILE), "variables": variables}
+
+
+def _save_env_values(values: dict[str, object]) -> None:
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ENV_FILE.touch(exist_ok=True)
+    for name, raw_value in values.items():
+        normalized_name = str(name)
+        value = "" if raw_value is None else str(raw_value)
+        if not value.strip():
+            unset_key(str(ENV_FILE), normalized_name)
+            os.environ.pop(normalized_name, None)
+            continue
+        set_key(str(ENV_FILE), normalized_name, value, quote_mode="auto")
+        os.environ[normalized_name] = value
 
 
 def run_demo_server(host: str = "127.0.0.1", port: int = 8080) -> None:

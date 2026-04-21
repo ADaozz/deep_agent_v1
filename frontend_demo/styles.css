@@ -173,7 +173,12 @@ button {
 .side-rail {
   flex: 0 0 auto;
   display: flex;
+  flex-direction: column;
   align-items: flex-start;
+  justify-content: space-between;
+  min-height: calc(100vh - 48px);
+  position: sticky;
+  top: 24px;
 }
 
 .side-rail-card {
@@ -183,6 +188,10 @@ button {
   align-items: center;
   gap: 10px;
   padding: 0;
+}
+
+.side-rail-bottom {
+  margin-top: 16px;
 }
 
 .side-menu-button {
@@ -264,11 +273,53 @@ button {
 }
 
 .app-badge {
+  position: relative;
   padding: 6px 10px;
   color: var(--text-dim);
   font-size: 12px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  transition: border-color 180ms ease, box-shadow 180ms ease, color 180ms ease, background 180ms ease;
+}
+
+.app-badge::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--text-muted);
+  box-shadow: 0 0 0 3px rgba(125, 133, 144, 0.12), 0 0 14px rgba(125, 133, 144, 0.35);
+  transition: background 180ms ease, box-shadow 180ms ease;
+}
+
+.app-badge.is-connected {
+  border-color: color-mix(in srgb, var(--success) 68%, var(--border));
+  background: color-mix(in srgb, var(--success-soft) 58%, var(--panel-soft));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--success) 18%, transparent),
+    0 0 22px color-mix(in srgb, var(--success) 34%, transparent);
+  color: var(--text);
+}
+
+.app-badge.is-connected::before {
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-soft), 0 0 16px color-mix(in srgb, var(--success) 80%, transparent);
+}
+
+.app-badge.is-disconnected {
+  border-color: color-mix(in srgb, var(--danger) 72%, var(--border));
+  background: color-mix(in srgb, var(--danger-soft) 58%, var(--panel-soft));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--danger) 18%, transparent),
+    0 0 22px color-mix(in srgb, var(--danger) 34%, transparent);
+  color: var(--text);
+}
+
+.app-badge.is-disconnected::before {
+  background: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-soft), 0 0 16px color-mix(in srgb, var(--danger) 80%, transparent);
+}
+
+.app-badge.is-checking {
+  border-color: var(--border-strong);
 }
 
 .dialog-title {
@@ -1472,6 +1523,56 @@ button {
   font-size: 13px;
 }
 
+.env-settings-panel {
+  min-height: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.env-group-stack {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 2px;
+}
+
+.env-group {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel-alt) 72%, transparent);
+  padding: 14px;
+}
+
+.env-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.env-field {
+  min-width: 0;
+}
+
+.env-field .field-control {
+  margin-top: 8px;
+}
+
+.env-field .form-feedback {
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.env-toolbar {
+  margin-top: auto;
+}
+
 .modal-root {
   position: fixed;
   inset: 0;
@@ -1520,6 +1621,15 @@ button {
   width: min(100%, 1320px);
   height: min(92vh, 920px);
   max-height: min(92vh, 920px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-card.is-env-center {
+  width: min(100%, 1040px);
+  height: min(90vh, 820px);
+  max-height: min(90vh, 820px);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -2561,11 +2671,24 @@ button {
 
   .side-rail {
     flex: 0 0 auto;
+    width: 100%;
+    min-height: auto;
+    position: static;
+    flex-direction: row;
+    justify-content: space-between;
+    gap: 10px;
   }
 
   .side-rail-card {
+    flex-direction: row;
     justify-content: flex-start;
     padding: 10px;
+    overflow-x: auto;
+  }
+
+  .side-rail-bottom {
+    margin-top: 0;
+    flex: 0 0 auto;
   }
 
   .side-menu-button {
@@ -2582,6 +2705,10 @@ button {
 
   .dashboard-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .env-grid {
+    grid-template-columns: 1fr;
   }
 
   .dialog-header {
