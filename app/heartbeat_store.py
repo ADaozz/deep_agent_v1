@@ -64,6 +64,46 @@ def ensure_heartbeat_schema(settings: Settings) -> None:
         cur.execute(HEARTBEAT_SCHEMA_SQL)
 
 
+def recover_stale_running_heartbeat_tasks(settings: Settings) -> dict[str, int]:
+    """Recover heartbeat rows left in running state by a previous backend process."""
+    stale_stop_reason = "backend_restarted_before_heartbeat_finished"
+    with _connect(settings) as conn:
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE demo_heartbeat_runs
+                SET finished_at = NOW(),
+                    status = 'error',
+                    stop_reason = %s
+                WHERE status = 'running'
+                  AND finished_at IS NULL
+                """,
+                (stale_stop_reason,),
+            )
+            recovered_runs = cur.rowcount
+            cur.execute(
+                """
+                UPDATE demo_heartbeat_tasks
+                SET status = CASE
+                        WHEN enabled = TRUE THEN 'active'
+                        ELSE 'disabled'
+                    END,
+                    last_status = CASE
+                        WHEN last_status = '' THEN 'error'
+                        ELSE last_status
+                    END,
+                    last_summary = CASE
+                        WHEN last_summary = '' THEN '上一次执行因后端重启中断，已恢复调度状态。'
+                        ELSE last_summary
+                    END,
+                    updated_at = NOW()
+                WHERE status = 'running'
+                """,
+            )
+            recovered_tasks = cur.rowcount
+    return {"tasks": recovered_tasks, "runs": recovered_runs}
+
+
 def _parse_timezone(timezone: str) -> ZoneInfo:
     try:
         return ZoneInfo((timezone or "Asia/Hong_Kong").strip() or "Asia/Hong_Kong")

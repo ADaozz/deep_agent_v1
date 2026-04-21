@@ -45,7 +45,7 @@ python3 serve_demo.py --host 0.0.0.0 --port 8080
 - 支持多轮 `Current round`，用于复杂任务的补证、交叉验证和继续派发
 - 支持按 query 动态生成本轮专属 worker，而不是固定槽位
 - 支持 PostgreSQL 持久化历史会话和线程级 UI 状态
-- 支持提示词、Skill、工具开关、环境变量和智能心跳管理
+- 支持提示词、Skill、工具开关、环境变量和智能心跳管理；后端重启时会恢复遗留的 running 心跳状态
 - 支持上传用户文件，并在会话中展示文件卡片
 - 支持发布 `workspace/` 结果文件，预览 Markdown、文本、图片、PDF、CSV 和 Excel
 - 支持 `filesystem` 与 `docker` 两种 backend；Docker 模式下 `execute` 通过容器执行
@@ -357,6 +357,7 @@ runtime_logs/deep_agent_stream.jsonl
 4. PostgreSQL 是否启动
 5. `runtime_logs/deep_agent_stream.jsonl` 是否出现对应事件
 6. Docker backend 下 `deep-agent-sandbox` 容器是否启动
+7. 如果智能心跳任务在重启前中断，启动日志是否出现 stale running 状态恢复提示
 
 ### API 概览
 
@@ -385,6 +386,7 @@ runtime_logs/deep_agent_stream.jsonl
 - Web 后端使用标准库 `http.server`，不是 FastAPI
 - prompt 和 skill 的前端保存是当前进程内热更新，重启后回到文件或代码默认值
 - 动态 worker 名册只服务于本轮运行，不做长期持久化
+- 智能心跳任务持久化在 PostgreSQL；后端停机期间不会执行，重启时会清理上一次遗留的 running 状态
 - Docker backend 只隔离 `execute`，主调度进程仍运行在宿主机
 
 ## Roadmap

@@ -36,6 +36,7 @@ from app.heartbeat_store import (
     get_heartbeat_task,
     list_heartbeat_runs,
     list_heartbeat_tasks,
+    recover_stale_running_heartbeat_tasks,
     start_heartbeat_task_now,
     update_heartbeat_enabled,
 )
@@ -1164,6 +1165,7 @@ def run_demo_server(host: str = "127.0.0.1", port: int = 8080) -> None:
     settings = load_settings(argv=[])
     ensure_chat_history_schema(settings)
     ensure_heartbeat_schema(settings)
+    recovered_heartbeat = recover_stale_running_heartbeat_tasks(settings)
     if settings.backend == "docker":
         validate_docker_backend_access(
             container_name=settings.docker_container_name,
@@ -1175,7 +1177,12 @@ def run_demo_server(host: str = "127.0.0.1", port: int = 8080) -> None:
     heartbeat_scheduler.start()
     server = ThreadingHTTPServer((host, port), DemoRequestHandler)
     print(f"Demo server listening on http://{host}:{port}")
-    print("POST /api/demo/run 会执行真实 create_deep_agent 调度。")
+    print("Agent execution endpoint: POST /api/demo/run")
+    if recovered_heartbeat["tasks"] or recovered_heartbeat["runs"]:
+        print(
+            "Heartbeat stale running 状态已恢复："
+            f" tasks={recovered_heartbeat['tasks']}, runs={recovered_heartbeat['runs']}"
+        )
     if settings.backend == "docker":
         print(
             "Docker backend 已通过启动自检："
